@@ -110,23 +110,24 @@
   character*20                 :: str
   integer                      :: ni,ne
 
-  line = trim(adjustl(line))
+  line = adjustl(line)
   str  = line(1:index(line,' ')-1)
   read(str,*)cf
 
-  if (cf.lt.csf_min) then
+  if (abs(cf).lt.csf_min) then
    cf = 0.
    return
   endif
 
+  ! move start of string to first index past coefficient
   line  = line(index(line,' ')+1:)
   ni = 0
   ne = 0
-  do while (len(line).gt.0)
+  do while (len(trim(line)).gt.0)
     str = line(1:index(line,' ')-1)
     if(index(str,':').ne.0) then
      ne = ne + 1
-     read(str,*)csf_vec(n_occ+ne) 
+     read(str(1:index(str,':')-1),*)csf_vec(n_occ+ne) 
      line = line(index(line,' ')+1:)
      str = line(1:index(line,' ')-1)
      read(str,*)csf_vec(n_intl+ne)
@@ -135,10 +136,13 @@
      read(str,*)csf_vec(ni)
     endif
     if (index(line,' ').eq.0) exit
+    line = adjustl(line(index(line,' ')+1:))
   enddo
 
+  if (ni.ne.n_intl.or.ne.ne.n_extl)stop 'error parsing CSF file, ni!=n_intl.or.ne!=n_extl'
+
  end subroutine
-  
+ 
 !
 !  Read the ciplcs file:
 !      1. determine the size of the orbital spaces
@@ -176,7 +180,7 @@
    line = trim(adjustl(line))
    str = line(1:index(line,' ')-1)
    read(str,*)cf
-   if (cf.lt.csf_min) exit
+   if (abs(cf).lt.csf_min) exit
   
    ! else, increment the csf counter
    n_csf = n_csf + 1
@@ -186,17 +190,16 @@
    if(n_csf.eq.1) then
 
     ! advance string to first orbital index
-    line = line(index(line,' ')+1:)
+    line = adjustl(line(index(line,' ')+1:))
 
     n_intl = 0
     n_extl = 0 
     m_s    = 0.
-    line = trim(adjustl(line(index(line,' ')+1:)))
-    do while (len(line).gt.0) 
+    do while (len(trim(adjustl(line))).gt.0) 
       str = line(1:index(line,' ')-1)
       if(index(str,':').ne.0) then
        n_extl = n_extl + 1
-       line   = line(index(line,' ')+1:)
+       line   = adjustl(line(index(line,' ')+1:))
        str    = line(1:index(line,' ')-1)
       else
        n_intl = n_intl + 1
@@ -205,7 +208,7 @@
       read(str,*)orb_occ
       m_s = m_s + spin(orb_occ)
       if (index(line,' ').eq.0) exit
-      line = adjustl(trim(line(index(line,' ')+1:)))
+      line = adjustl(line(index(line,' ')+1:))
     enddo
    endif
   enddo
@@ -216,8 +219,10 @@
   n_det_max = 5 * n_csf
   allocate(csf_vec(rec_len))
   allocate(det_vec(rec_len,n_det_max))
+  allocate(det_cf(n_det_max))
   ! initialize total number of orbitals to number of occupied
   n_orb     = n_occ
+  n_det     = 0
 
   ! go back to the beginning of the file
   rewind(cfile)
@@ -230,11 +235,16 @@
    ! read the CSF
    call parse_line(line, cf, csf_vec)
 
+   print *,'line=',line
+   print *,'cf=',cf
+   print *,'csf_vec=',csf_vec
+
    ! if the returned coefficient is zero, we've read all csfs less than cutoff
    if (cf == 0.) exit
 
    ! check the external orbital index: update n_orb if necessary
-   if (any(csf_vec(n_intl+1:n_occ).gt.n_orb)) n_orb = maxval(csf_vec(n_intl+1:n_occ))
+   n_orb = max(n_orb, maxval(csf_vec(n_occ:)))
+   print *,'n_orb=',n_orb
 
    ! else, convert the csf to a linear combination of determinants
    call unroll_csf(cf, csf_vec)  
@@ -272,9 +282,6 @@
   double precision    :: compute_s2
   double precision    :: eps=1.d-8
 
-
-  ! global variables
-  n_det = 0
 
   db  = (/ 0,  1, -1, 0 /)
   mz2 = (/ 1, -1 /)
@@ -366,12 +373,14 @@
     enddo ! do k =1 ,nocc 
  
     if(.not.zero) then
- 
+   
+      print *,'generated det: ',det
       ! convert the determinant to multigrid format
       call convert_det(det,idet)
       ! include parity in value of cf -- necessary to compute S^2 consistently
       if(cf.lt.0)stop 'ERROR computing determinant'
       cf = sqrt(cf)*sgn*oparity(idet)
+      print *,'computed cf prefactor: ',cf
 
 !      nchk = nchk + 1
 !      chkdet(:,nchk) = idet
@@ -385,6 +394,9 @@
        endif
       enddo
 
+      print *,'found=',found
+      print *,'cf*csf_cf=',cf*csf_cf
+
       if(found.ne.0)then
        det_cf(found)%val = det_cf(found)%val + cf*csf_cf
       else
@@ -394,6 +406,8 @@
        det_cf(n_det)%val = cf*csf_cf
        det_vec(:,n_det)  = idet
       endif
+
+      print *,'n_det=',n_det
     endif !if(.not.zero) 
    enddo !do j = 1,nloops
 
@@ -594,7 +608,7 @@
   do i = 1,n_vrt
    orb_i = n_intl + i
    if(any(det(n_occ:)==orb_i)) then
-    dif = abs(det(n_occ:)-orb_i)
+    dif = abs(det(n_occ+1:)-orb_i)
     ind = minloc(dif,dim=1)
     if (abs(det(n_intl+ind)).eq.1) then
       write(istr,'(sp,i3)')det(n_intl+ind)
