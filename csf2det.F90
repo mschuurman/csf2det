@@ -8,20 +8,24 @@
   ! CSF file
   character*144                             :: csf_file
   ! numerical cutoff for reading CSFs
-  double precision                          :: ccutoff = 1e-5 
+  double precision                          :: csf_min = 0. 
   ! numerical cutoff for printing determinants
-  double precision                          :: dcutoff = 1e-5
+  double precision                          :: det_min = 0.
   ! value of Ms for determinants/csfs
-  double precision                          :: ms
+  double precision                          :: m_s
 
   ! number of internal orbitals, including frozen
   integer                                   :: n_intl
   ! maximum number of external orbitals (i.e. mcscf=0, foci=1, soci=2)
   integer                                   :: n_extl
-  ! total number of occupied orbitals (i.e. nintl+nextl)
+  ! total number of occupied orbitals in a determinant (i.e. nintl+nextl)
   integer                                   :: n_occ
+  ! total number of orbitals in basis
+  integer                                   :: n_orb
 
-  ! maximum number of determinants 
+  ! maximum number of determinants (for array allocation)
+  integer                                   :: n_det_max
+  ! actual number of determinants
   integer                                   :: n_det
   ! record length -- is nintl + 2 * next (i.e. external orbs, plus orb label)
   integer                                   :: rec_len
@@ -54,39 +58,41 @@
 ! INITIALIZATION ROUTINES
 !******************************************************
  subroutine read_cmdline()
-  use globaldata, only: csf_file,ccutoff,dcutoff
+  use globaldata, only: csf_file,csf_min,det_min
   implicit none
-  integer                   :: narg
+  integer                   :: n_arg, i_arg
   character*144             :: abuf
 
-  narg = iargc()
+  n_arg = iargc()
 
-  if(narg.lt.1)stop 'need to specify input file...'
+  if(n_arg.lt.1)stop 'need to specify input file...'
 
   ! read in input file
   call getarg(1,abuf)
   csf_file = adjustl(abuf)
 
-  iarg = 2
-  do while iarg < narg
-    call getarg(iarg,abuf)
+  i_arg = 2
+  do while (i_arg < n_arg)
+    call getarg(i_arg,abuf)
 
-    if trim(adjustl(abuf)) == '-cmin' then
-       iarg += 1
-       call getarg(iarg,abuf)
-       read(trim(adjustl(abuf)),*) ccutoff
+    if (trim(adjustl(abuf)) == '-csf_min') then
+       i_arg = i_arg + 1
+       call getarg(i_arg,abuf)
+       abuf = trim(adjustl(abuf))
+       read(abuf,*) csf_min
 
-    elseif trim(adjustl(abuf)) == '-dmin' then
-       iarg += 1
-       call getarg(iarg,abuf)
-       read(trim(adjustl(abuf)),*) dcutoff
+    elseif (trim(adjustl(abuf)) == '-det_min') then
+       i_arg = i_arg + 1
+       call getarg(i_arg,abuf)
+       abuf = trim(adjustl(abuf))
+       read(abuf,*) det_min
 
     else
        stop ' command line argument argument not recognized...'
            
     endif
 
-    iarg += 1
+    i_arg = i_arg + 1
   enddo   
 
   return
@@ -96,10 +102,11 @@
 !
 !
  subroutine parse_line(line, cf, csf_vec)
+  use globaldata
   implicit none
   character*144, intent(inout) :: line
   real, intent(out)            :: cf
-  integer, intent(out)         :: csf_vec(:)
+  integer, intent(out)         :: csf_vec(rec_len)
   character*20                 :: str
   integer                      :: ni,ne
 
@@ -107,7 +114,7 @@
   str  = line(1:index(line,' ')-1)
   read(str,*)cf
 
-  if (cf.lt.ccutoff) then
+  if (cf.lt.csf_min) then
    cf = 0.
    return
   endif
@@ -118,18 +125,17 @@
   do while (len(line).gt.0)
     str = line(1:index(line,' ')-1)
     if(index(str,':').ne.0) then
-     ne += 1
-     read(str,*)csf_vec(nocc+ne) 
+     ne = ne + 1
+     read(str,*)csf_vec(n_occ+ne) 
      line = line(index(line,' ')+1:)
      str = line(1:index(line,' ')-1)
-     read(str,*)csf_vec(nintl+ne)
+     read(str,*)csf_vec(n_intl+ne)
     else
-     ni += 1
+     ni = ni + 1
      read(str,*)csf_vec(ni)
     endif
     if (index(line,' ').eq.0) exit
   enddo
- endif
 
  end subroutine
   
@@ -138,16 +144,19 @@
 !      1. determine the size of the orbital spaces
 !      2. figure out how many CSFs there are
 !
- subroutine create_csf_list()
+ subroutine parse_csf_list()
   use globaldata
   implicit none
   integer                :: ios
-  integer                :: ncsf
+  integer                :: n_csf
+  integer,allocatable    :: csf_vec(:)
   integer                :: cfile=99
+  integer                :: orb_occ
   real                   :: cf
   character*144          :: line
   character*20           :: str
-  real                   :: spin = (/0, 0.5, -0.5, 0/)
+  real,dimension(0:3)    :: spin = (/0.0, 0.5, -0.5, 0.0/)
+
   ! open the csf file --
   ! this file is formated such that there is one csf per line. A CSF is specified by:
   ! CF  X X X X X .. ORB: X ORB: X
@@ -157,7 +166,7 @@
   open(unit=cfile,file=trim(csf_file));
 
   ! get the number of CSFs in the file
-  ncsf=0
+  n_csf=0
   do 
    read(cfile, 1000, iostat=ios)line
    if(ios.lt.0)exit
@@ -167,61 +176,77 @@
    line = trim(adjustl(line))
    str = line(1:index(line,' ')-1)
    read(str,*)cf
-   if (cf.lt.ccutoff) exit
-
+   if (cf.lt.csf_min) exit
+  
    ! else, increment the csf counter
-   ncsf += 1
+   n_csf = n_csf + 1
 
    ! if this is the first line, also figure out how many orbital indices
    ! we need to store
-   if(ncsf.eq.1) then
-    nintl = 0
-    nextl = 0 
+   if(n_csf.eq.1) then
+
+    ! advance string to first orbital index
     line = line(index(line,' ')+1:)
+
+    n_intl = 0
+    n_extl = 0 
+    m_s    = 0.
+    line = trim(adjustl(line(index(line,' ')+1:)))
     do while (len(line).gt.0) 
       str = line(1:index(line,' ')-1)
       if(index(str,':').ne.0) then
-       nextl += 1
+       n_extl = n_extl + 1
        line   = line(index(line,' ')+1:)
+       str    = line(1:index(line,' ')-1)
       else
-       nintl += 1
+       n_intl = n_intl + 1
       endif
+      ! read the orbital occupation
+      read(str,*)orb_occ
+      m_s = m_s + spin(orb_occ)
       if (index(line,' ').eq.0) exit
-      line = line(index(line,' ')+1:)
+      line = adjustl(trim(line(index(line,' ')+1:)))
     enddo
    endif
   enddo
 
   ! initially allocate the determinant array to 5 * CSFs
-  nocc     = nintl + nextl
-  ndet_max = 5 * ncsf
-  allocate(csf_vec(nintl+2*nextl))
-  allocate(det_vec(nintl+2*nextl,ndet_max))
+  n_occ     = n_intl + n_extl
+  rec_len   = n_intl + 2*n_extl
+  n_det_max = 5 * n_csf
+  allocate(csf_vec(rec_len))
+  allocate(det_vec(rec_len,n_det_max))
+  ! initialize total number of orbitals to number of occupied
+  n_orb     = n_occ
 
   ! go back to the beginning of the file
   rewind(cfile)
 
   do
-   read(ifile, 1000, iostat=ios)line
+   read(cfile, 1000, iostat=ios)line
    if(ios.lt.0)exit
    if(ios.gt.0)stop 'error reading csf_file'
 
+   ! read the CSF
    call parse_line(line, cf, csf_vec)
 
    ! if the returned coefficient is zero, we've read all csfs less than cutoff
-   if (cf.eq.0) exit
+   if (cf == 0.) exit
+
+   ! check the external orbital index: update n_orb if necessary
+   if (any(csf_vec(n_intl+1:n_occ).gt.n_orb)) n_orb = maxval(csf_vec(n_intl+1:n_occ))
 
    ! else, convert the csf to a linear combination of determinants
    call unroll_csf(cf, csf_vec)  
 
   enddo
 
-  close(ifile)
+  close(cfile)
 
   return
 1000 format(144a)
 1001 format(a9,i5,a9,i5,a9,i5,a9,i5)
- end subroutine parseInput
+ end subroutine parse_csf_list 
 
 !
 !  Project out the contribution of allowed determinants from a CSF
@@ -231,25 +256,25 @@
   use globaldata
   implicit none
   real, intent(in)    :: csf_cf
-  integer, intent(in) :: csf_vec
+  integer, intent(in) :: csf_vec(rec_len)
  
   integer             :: db(4),mz2(2),d1f(2),d2f(2),del(2)
   integer             :: num,denom,sgn
   integer             :: i,j,k,l,icnt,bt,found
   integer             :: ms2,m2,nalpha,nopen,nloops
-  integer             :: bvec(nocc),aloc(nocc),oopen(nocc)
-  integer             :: idet(nocc+nextl),det(nocc+nextl),refdet(nocc+nextl)
+  integer             :: bvec(n_occ),aloc(n_occ),oopen(n_occ)
+  integer             :: idet(rec_len),det(rec_len),refdet(rec_len)
   double precision    :: cf
   logical             :: zero
   integer             :: ifac
   integer             :: oparity
 
-! DEBUG --------------
-!  integer             :: nchk
-!  integer             :: chkdet(rlen,1024)
-!  double precision    :: chkcf(1024)
   double precision    :: compute_s2
   double precision    :: eps=1.d-8
+
+
+  ! global variables
+  n_det = 0
 
   db  = (/ 0,  1, -1, 0 /)
   mz2 = (/ 1, -1 /)
@@ -257,18 +282,17 @@
   d2f = (/-1,  1 /) 
   del = (/ 1,  0 /)
 
-  ndet ` = 0
-  ms2   = int(2.*ms)
+  ms2   = int(2.*m_s)
   bt    = 0
   nopen = 0
   bvec  = 0
  
   refdet = csf_vec
 
-  do j = 1,nocc
-   bt = bt + db(csfvec(j,i)+1)
+  do j = 1,n_occ
+   bt = bt + db(csf_vec(j)+1)
    bvec(j) = bt
-   if(csfvec(j,i).eq.1.or.csfvec(j,i).eq.2)then
+   if(csf_vec(j).eq.1.or.csf_vec(j).eq.2)then
     nopen = nopen + 1
     oopen(nopen) = j
     refdet(j) = 2
@@ -310,7 +334,7 @@
    sgn = 1
    m2 = 0
    zero = .false.
-   do k = 1,nocc
+   do k = 1,n_occ
     select case(csf_vec(k))
 
       case(1)
@@ -344,7 +368,7 @@
     if(.not.zero) then
  
       ! convert the determinant to multigrid format
-      call convertDet(det,idet)
+      call convert_det(det,idet)
       ! include parity in value of cf -- necessary to compute S^2 consistently
       if(cf.lt.0)stop 'ERROR computing determinant'
       cf = sqrt(cf)*sgn*oparity(idet)
@@ -354,8 +378,8 @@
 !      chkcf(nchk) = cf
 
       found = 0
-      do k = 1,ndet
-       if(all(detvec(:,k).eq.idet))then
+      do k = 1,n_det
+       if(all(det_vec(:,k).eq.idet))then
          found = k
          exit
        endif
@@ -364,14 +388,11 @@
       if(found.ne.0)then
        det_cf(found)%val = det_cf(found)%val + cf*csf_cf
       else
-       ndet = ndet + 1
-       if(ndet.gt.numdet) then
-        stat = .false.
-        stop 'ndet .gt. numdet, increase rdet2csf'
-       endif
-       det_cf(ndet)%ind = ndet
-       det_cf(ndet)%val = cf*csf_cf
-       det_vec(:,ndet)  = idet
+       n_det = n_det + 1
+       if(n_det.gt.n_det_max) stop 'ndet .gt. numdet, increase rdet2csf'
+       det_cf(n_det)%ind = n_det
+       det_cf(n_det)%val = cf*csf_cf
+       det_vec(:,n_det)  = idet
       endif
     endif !if(.not.zero) 
    enddo !do j = 1,nloops
@@ -390,15 +411,13 @@
 !        stop 'S^2 value incorrect for CSF -> DET conversion'
 !    endif
 
-  enddo !do i = 1,ncsf
-
   ! DEBUG ---- comptue S2 for entire wfn
   !num = compute_s2(ndet,detcf(1:ndet)%val,detvec(:,1:ndet))
   !write(*,*)' s2 value = ',num
 
   return
 1000 format(20(i3))
- end subroutine makeDetList
+ end subroutine unroll_csf 
 
 
 !
@@ -409,26 +428,27 @@
   use globaldata
   implicit none
   integer            :: i
+  integer            :: ofile=99
   double precision   :: dnorm
 
-  if(ndet.eq.0)return
+  if(n_det.eq.0)return
 
-  call sortDetList()
+  call sort_det_list()
 
   dnorm = 0.
   i = 1 
-  do while(abs(det_cf(i)%val).gt.d_cutoff)
+  do while(abs(det_cf(i)%val).gt.det_min)
    call print_det(det_cf(i)%val,det_vec(:,det_cf(i)%ind))
    dnorm = dnorm + det_cf(i)%val**2
    i = i + 1
-   if(i.gt.ndet)exit
+   if(i.gt.n_det)exit
   enddo
 
   ! not sure how to best handle this.  For the time being, useful to check
   ! wavefunction norm to make sure cutoff is not too severe.
-  open(unit=ifile,file='norm.dat',status='replace')
-  write(ifile,'(f16.12)')sqrt(dnorm)
-  close(ifile)  
+  open(unit=ofile,file='norm.dat',status='replace')
+  write(ofile,'(f16.12)')sqrt(dnorm)
+  close(ofile)  
 
   return
  end subroutine write_det_list
@@ -456,50 +476,50 @@
 ! sorts the coefficient array, and maps a make for the vector list
 !
 !
- subroutine sortDetList
+ subroutine sort_det_list
   use globaldata
   implicit none
   integer                         :: i
   type(kvpair),allocatable        :: scr(:)
 
-  allocate(scr(int((ndet+1)/2)))
-  call mergesort(detcf(1:ndet),ndet,scr)
+  allocate(scr(int((n_det+1)/2)))
+  call mergesort(det_cf(1:n_det),n_det,scr)
   deallocate(scr)
 
   return
- end subroutine sortDetList
+ end subroutine sort_det_list
 
 
 !
 ! Convert a determinant in COLUMBUS 'step' notation to MULTIGRID notation
 !
- subroutine convertDet(indet,outdet)
-  use globaldata, only: rlen,nocc
+ subroutine convert_det(indet,outdet)
+  use globaldata, only: rec_len,n_occ
   implicit none
-  integer,intent(in)  :: indet(rlen)
-  integer,intent(out) :: outdet(rlen)
+  integer,intent(in)  :: indet(rec_len)
+  integer,intent(out) :: outdet(rec_len)
   integer             :: i,ivec(4)
 
   ivec = (/0, 1, -1, 2 /)
-  do i = 1,nocc
+  do i = 1,n_occ
    outdet(i) = ivec(indet(i)+1)
   enddo
-  outdet(nocc+1:rlen) = indet(nocc+1:rlen)
+  outdet(n_occ+1:rec_len) = indet(n_occ+1:rec_len)
 
   return
- end subroutine convertDet
+ end subroutine convert_det
 
 !
 !  compute effect of S2 operator on a single determinant
 !
   double precision function compute_s2(ndet,cf,det)
-   use globaldata, only: rlen,nocc
+   use globaldata, only: rec_len,n_occ
    implicit none
    integer,intent(in)           :: ndet
    double precision, intent(in) :: cf(ndet)
-   integer, intent(in)          :: det(rlen,ndet)
+   integer, intent(in)          :: det(rec_len,ndet)
    integer                      :: i,j,k,l
-   integer                      :: trial(rlen)
+   integer                      :: trial(rec_len)
    integer                      :: par(ndet)
    integer                      :: oparity
    double precision             :: norm
@@ -513,11 +533,11 @@
 
    do i = 1,ndet
     norm = norm + cf(i)**2
-    do j = 1,nocc
+    do j = 1,n_occ
      if(abs(det(j,i)).ne.1)cycle
      compute_s2 = compute_s2 + 0.5 * cf(i)**2 ! diagonal contribution of the ladder operators
 
-     do k = 1,nocc
+     do k = 1,n_occ
       if(abs(det(k,i)).ne.1) cycle
       compute_s2 = compute_s2 + 0.25 * det(j,i) * det(k,i) * cf(i)**2  ! contribution from Sz^2
 
@@ -543,60 +563,54 @@
 !
 ! prints a determinant in multigrid format
 !
- subroutine printDet(cf,det)
-  use globaldata, only: rlen,nfrzn,nintl,nocc,next,nvrt,norb,caswfn
+ subroutine print_det(cf,det)
+  use globaldata, only: rec_len,n_intl,n_extl,n_occ,n_orb
   implicit none
   double precision,intent(in)       :: cf
-  integer,intent(in)        :: det(rlen)
-  integer                           :: i,exind,oind
+  integer,intent(in)                :: det(rec_len)
+  integer                           :: n_vrt
+  integer                           :: dif(n_extl)
+  integer                           :: i,orb_i,ind
   character*4                       :: lstr
   character*3                       :: istr
   character*17                      :: ofmt
-  character*(3*norb)                :: ovec
+  character*(3*n_orb)                :: ovec
 
-  if(caswfn)then
-   write(lstr,'(i4)')3*(nfrzn+nintl)
-  else
-   write(lstr,'(i4)')3*norb
-  endif
+  n_vrt = n_orb - n_intl
+
+  write(lstr,'(i4)')3*n_orb
   ofmt = '(f15.10,1x,a'//trim(adjustl(lstr))//')'
 
   ovec = ''
-  do i = 1,nfrzn
-   ovec = trim(adjustl(ovec))//'  2'
-  enddo
-
-  do i = 1,nintl
-   if(abs(det(next+i)).eq.1)then
-    write(istr,'(sp,i3)')det(next+i)
+  do i = 1,n_intl
+   if(abs(det(i)).eq.1)then
+    write(istr,'(sp,i3)')det(i)
    else
-    write(istr,'(ss,i3)')det(next+i)
+    write(istr,'(ss,i3)')det(i)
    endif
    ovec = trim(adjustl(ovec))//adjustr(istr)
   enddo
 
-  if(.not.caswfn) then
-   exind=1
-   do i = 1,nvrt
-    oind = nfrzn + nintl + i
-    if(oind.eq.det(nocc+exind)) then
-     if(abs(det(exind)).eq.1)then
-     write(istr,'(sp,i3)')det(exind)
-      else
-      write(istr,'(ss,i3)')det(exind)
-     endif
-     ovec = trim(adjustl(ovec))//adjustr(istr)
-     if(exind.lt.next)exind = exind + 1
+  do i = 1,n_vrt
+   orb_i = n_intl + i
+   if(any(det(n_occ:)==orb_i)) then
+    dif = abs(det(n_occ:)-orb_i)
+    ind = minloc(dif,dim=1)
+    if (abs(det(n_intl+ind)).eq.1) then
+      write(istr,'(sp,i3)')det(n_intl+ind)
     else
-     ovec = trim(adjustl(ovec))//'  0'
+      write(istr,'(ss,i3)')det(n_intl+ind)
     endif
-   enddo
-  endif
+    ovec = trim(adjustl(ovec))//adjustr(istr)
+   else
+    ovec = trim(adjustl(ovec))//'  0'
+   endif
+  enddo
 
   write(*,ofmt)cf,trim(adjustl(ovec))
 
   return
- end subroutine printDet
+ end subroutine print_det
 
 
 !
@@ -619,7 +633,7 @@
 ! 
  subroutine mergearr(a,b,c,na,nb,nc)
    use globaldata
-   integer, intent(in)    :: na,nb,nc   ! Normal usage: NA+NB = NC
+   integer, intent(in)         :: na,nb,nc   ! Normal usage: NA+NB = NC
    type(kvpair), intent(inout) :: a(na)      ! B overlays C(NA+1:NC)
    type(kvpair), intent(in)    :: b(nb)
    type(kvpair), intent(inout) :: c(nc)
@@ -694,36 +708,21 @@
 ! get the sign change upon putting a determinant in alpha string notation
 !
  integer function oparity(det)
-  use globaldata, only: rlen,nfrzn,nintl,next,nocc
+  use globaldata, only: rec_len,n_occ
   implicit none
-  integer,intent(in)   :: det(rlen)
-  integer                      :: dsort(2*(nocc+nfrzn))
+  integer,intent(in)           :: det(rec_len)
+  integer                      :: dsort(2*n_occ)
   integer                      :: i,j,na,nb,at,nt
   integer                      :: icnt,nbnd,newbnd
 
-  at = nfrzn + count(det(1:nocc)==1) + count(det(1:nocc)==2)
+  at = count(det(1:n_occ)==1) + count(det(1:n_occ)==2)
   nt = 0
   na = 0
+  ! initialize n[beta] to the end of the alpha string
   nb = at 
 
-  ! first do frozen orbitals
-  do i = 1,nfrzn
-    nt = nt + 1;na = na + 1;dsort(nt) = na
-    nt = nt + 1;nb = nb + 1;dsort(nt) = nb
-  enddo
-
-  ! then do internal orbitals 
-  do i = next+1,nocc
-   if(any(det(i)==(/1, 2/)))then
-    nt = nt + 1;na = na + 1;dsort(nt) = na
-   endif
-   if(any(det(i)==(/-1, 2/)))then
-    nt = nt + 1;nb = nb + 1;dsort(nt) = nb
-   endif
-  enddo
-
-  ! next do external orbitals 
-  do i = 1,next
+  ! loop over all the occupied orbitals 
+  do i = 1,n_occ
    if(any(det(i)==(/1, 2/)))then
     nt = nt + 1;na = na + 1;dsort(nt) = na
    endif
