@@ -14,6 +14,8 @@
   ! value of Ms for determinants/csfs
   double precision                          :: m_s
 
+  ! norm of the wavefunction in CSF basis
+  double precision                          :: csf_norm
   ! number of internal orbitals, including frozen
   integer                                   :: n_intl
   ! maximum number of external orbitals (i.e. mcscf=0, foci=1, soci=2)
@@ -217,12 +219,13 @@
   n_occ     = n_intl + n_extl
   rec_len   = n_intl + 2*n_extl
   n_det_max = 5 * n_csf
-  allocate(csf_vec(rec_len))
-  allocate(det_vec(rec_len,n_det_max))
-  allocate(det_cf(n_det_max))
   ! initialize total number of orbitals to number of occupied
   n_orb     = n_occ
   n_det     = 0
+  csf_norm  = 0.
+  allocate(csf_vec(rec_len))
+  allocate(det_vec(rec_len,n_det_max))
+  allocate(det_cf(n_det_max))
 
   ! go back to the beginning of the file
   rewind(cfile)
@@ -234,6 +237,9 @@
 
    ! read the CSF
    call parse_line(line, cf, csf_vec)
+
+   ! compute the norm of the csf wfn for diagnostic purposes
+   csf_norm = csf_norm + cf**2
 
    ! if the returned coefficient is zero, we've read all csfs less than cutoff
    if (cf == 0.) exit
@@ -428,13 +434,15 @@
   ! not sure how to best handle this.  For the time being, useful to check
   ! wavefunction norm and S^2 to make sure cutoff is not too severe.
   open(unit=ofile,file='csf2det.out',status='replace')
-  write(ofile,1000)norm
-  write(ofile,1001)s2
+  write(ofile,1000)csf_norm
+  write(ofile,1001)norm
+  write(ofile,1002)s2
   close(ofile)  
 
   return
-1000 format('Norm: ',f15.10)
-1001 format('S^2: ',f8.4)
+1000 format('norm of wfn in CSF basis: ',f15.10)
+1001 format('norm of wfn in det basis: ',f15.10)
+1002 format('S^2: ',f8.4)
  end subroutine write_det_list
 
 !
