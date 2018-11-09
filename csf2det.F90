@@ -128,7 +128,7 @@
     if(index(str,':').ne.0) then
      ne = ne + 1
      read(str(1:index(str,':')-1),*)csf_vec(n_occ+ne) 
-     line = line(index(line,' ')+1:)
+     line = adjustl(line(index(line,' ')+1:))
      str = line(1:index(line,' ')-1)
      read(str,*)csf_vec(n_intl+ne)
     else
@@ -235,16 +235,11 @@
    ! read the CSF
    call parse_line(line, cf, csf_vec)
 
-   print *,'line=',line
-   print *,'cf=',cf
-   print *,'csf_vec=',csf_vec
-
    ! if the returned coefficient is zero, we've read all csfs less than cutoff
    if (cf == 0.) exit
 
    ! check the external orbital index: update n_orb if necessary
    n_orb = max(n_orb, maxval(csf_vec(n_occ:)))
-   print *,'n_orb=',n_orb
 
    ! else, convert the csf to a linear combination of determinants
    call unroll_csf(cf, csf_vec)  
@@ -270,7 +265,7 @@
  
   integer             :: db(4),mz2(2),d1f(2),d2f(2),del(2)
   integer             :: num,denom,sgn
-  integer             :: i,j,k,l,icnt,bt,found
+  integer             :: j,k,l,icnt,bt,found
   integer             :: ms2,m2,nalpha,nopen,nloops
   integer             :: bvec(n_occ),aloc(n_occ),oopen(n_occ)
   integer             :: idet(rec_len),det(rec_len),refdet(rec_len)
@@ -278,10 +273,7 @@
   logical             :: zero
   integer             :: ifac
   integer             :: oparity
-
-  double precision    :: compute_s2
   double precision    :: eps=1.d-8
-
 
   db  = (/ 0,  1, -1, 0 /)
   mz2 = (/ 1, -1 /)
@@ -374,17 +366,11 @@
  
     if(.not.zero) then
    
-      print *,'generated det: ',det
       ! convert the determinant to multigrid format
       call convert_det(det,idet)
       ! include parity in value of cf -- necessary to compute S^2 consistently
       if(cf.lt.0)stop 'ERROR computing determinant'
       cf = sqrt(cf)*sgn*oparity(idet)
-      print *,'computed cf prefactor: ',cf
-
-!      nchk = nchk + 1
-!      chkdet(:,nchk) = idet
-!      chkcf(nchk) = cf
 
       found = 0
       do k = 1,n_det
@@ -393,9 +379,6 @@
          exit
        endif
       enddo
-
-      print *,'found=',found
-      print *,'cf*csf_cf=',cf*csf_cf
 
       if(found.ne.0)then
        det_cf(found)%val = det_cf(found)%val + cf*csf_cf
@@ -407,27 +390,8 @@
        det_vec(:,n_det)  = idet
       endif
 
-      print *,'n_det=',n_det
     endif !if(.not.zero) 
    enddo !do j = 1,nloops
-
-   !DEBUG------------ compute S2 for this CSF
-!   if(abs(compute_s2(nchk,chkcf,chkdet(:,1:nchk))-ms*(ms+1.)).gt.eps) then
-!        write(*,*)'vec=',csfvec(:,i)
-!        write(*,*)'nchk=',nchk
-!        do j = 1,nchk
-!         write(*,*)'coef=',chkcf(j)
-!         write(*,*)'chkdet=',chkdet(:,j)
-!        enddo
-!        write(*,*)'cf=',csfcf(i)
-!        write(*,*)'ms(ms+1)=',ms*(ms+1.)
-!        write(*,*)'i=',i,' S^2',compute_s2(nchk,chkcf,chkdet(:,1:nchk)) 
-!        stop 'S^2 value incorrect for CSF -> DET conversion'
-!    endif
-
-  ! DEBUG ---- comptue S2 for entire wfn
-  !num = compute_s2(ndet,detcf(1:ndet)%val,detvec(:,1:ndet))
-  !write(*,*)' s2 value = ',num
 
   return
 1000 format(20(i3))
@@ -443,28 +407,34 @@
   implicit none
   integer            :: i
   integer            :: ofile=99
-  double precision   :: dnorm
+  double precision   :: norm,s2
 
   if(n_det.eq.0)return
 
+  ! sort so determinants printed largest coefficient to smallest
   call sort_det_list()
 
-  dnorm = 0.
+  ! print determinants
   i = 1 
   do while(abs(det_cf(i)%val).gt.det_min)
    call print_det(det_cf(i)%val,det_vec(:,det_cf(i)%ind))
-   dnorm = dnorm + det_cf(i)%val**2
    i = i + 1
    if(i.gt.n_det)exit
   enddo
 
+  ! compute S^2 and norm
+  call compute_norm_s2(norm, s2)
+ 
   ! not sure how to best handle this.  For the time being, useful to check
-  ! wavefunction norm to make sure cutoff is not too severe.
-  open(unit=ofile,file='norm.dat',status='replace')
-  write(ofile,'(f16.12)')sqrt(dnorm)
+  ! wavefunction norm and S^2 to make sure cutoff is not too severe.
+  open(unit=ofile,file='csf2det.out',status='replace')
+  write(ofile,1000)norm
+  write(ofile,1001)s2
   close(ofile)  
 
   return
+1000 format('Norm: ',f15.10)
+1001 format('S^2: ',f8.4)
  end subroutine write_det_list
 
 !
@@ -526,44 +496,42 @@
 !
 !  compute effect of S2 operator on a single determinant
 !
-  double precision function compute_s2(ndet,cf,det)
-   use globaldata, only: rec_len,n_occ
+  subroutine compute_norm_s2(norm,s2)
+   use globaldata, only: rec_len,n_occ,n_det,det_cf,det_vec
    implicit none
-   integer,intent(in)           :: ndet
-   double precision, intent(in) :: cf(ndet)
-   integer, intent(in)          :: det(rec_len,ndet)
+   double precision,intent(out) :: norm
+   double precision, intent(out):: s2
    integer                      :: i,j,k,l
    integer                      :: trial(rec_len)
-   integer                      :: par(ndet)
+   integer                      :: par(n_det)
    integer                      :: oparity
-   double precision             :: norm
 
-   compute_s2 = 0.
+   s2 = 0.
    norm = 0.
  
-   do i = 1,ndet
-    par(i) = oparity(det(:,i))
+   do i = 1,n_det
+    par(i) = oparity(det_vec(:,i))
    enddo
 
-   do i = 1,ndet
-    norm = norm + cf(i)**2
+   do i = 1,n_det
+    norm = norm + det_cf(i)%val**2
     do j = 1,n_occ
-     if(abs(det(j,i)).ne.1)cycle
-     compute_s2 = compute_s2 + 0.5 * cf(i)**2 ! diagonal contribution of the ladder operators
+     if(abs(det_vec(j,i)).ne.1)cycle
+     s2 = s2 + 0.5 * det_cf(i)%val**2 ! diagonal contribution of the ladder operators
 
      do k = 1,n_occ
-      if(abs(det(k,i)).ne.1) cycle
-      compute_s2 = compute_s2 + 0.25 * det(j,i) * det(k,i) * cf(i)**2  ! contribution from Sz^2
+      if(abs(det_vec(k,i)).ne.1) cycle
+      s2 = s2 + 0.25 * det_vec(j,i) * det_vec(k,i) * det_cf(i)%val**2  ! contribution from Sz^2
 
-      if(det(j,i).ne.det(k,i)) then
-       trial = det(:,i)
+      if(det_vec(j,i).ne.det_vec(k,i)) then
+       trial = det_vec(:,i)
        trial(j) = -trial(j)
        trial(k) = -trial(k)
        
-       do l = 1,ndet
-        if(any(det(:,l).ne.trial)) cycle
+       do l = 1,n_det
+        if(any(det_vec(:,l).ne.trial)) cycle
  
-        compute_s2 = compute_s2 + 0.5 * cf(i) * cf(l) * par(i) * par(l)
+        s2 = s2 + 0.5 * det_cf(i)%val * det_cf(l)%val * par(i) * par(l)
 
        enddo ! end l = 1,ndet
       endif ! if(det(i,j)!=det(i,k)
@@ -571,8 +539,10 @@
     enddo ! j = 1,norb
    enddo ! i = 1,ndet
 
+   norm = sqrt(norm)
+
    return
-  end function compute_s2
+  end subroutine compute_norm_s2
 
 !
 ! prints a determinant in multigrid format
@@ -588,7 +558,7 @@
   character*4                       :: lstr
   character*3                       :: istr
   character*17                      :: ofmt
-  character*(3*n_orb)                :: ovec
+  character*(3*n_orb)               :: ovec
 
   n_vrt = n_orb - n_intl
 
