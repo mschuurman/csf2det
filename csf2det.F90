@@ -123,8 +123,9 @@
 
   ! move start of string to first index past coefficient
   line  = line(index(line,' ')+1:)
-  ni = 0
-  ne = 0
+  ni      = 0
+  ne      = 0
+  csf_vec = 0
   do while (len(trim(line)).gt.0)
     str = line(1:index(line,' ')-1)
     if(index(str,':').ne.0) then
@@ -132,10 +133,10 @@
      read(str(1:index(str,':')-1),*)csf_vec(n_occ+ne) 
      line = adjustl(line(index(line,' ')+1:))
      str = line(1:index(line,' ')-1)
-     read(str,*)csf_vec(n_intl+ne)
+     read(str,*)csf_vec(ne)
     else
      ni = ni + 1
-     read(str,*)csf_vec(ni)
+     read(str,*)csf_vec(n_extl+ni)
     endif
     if (index(line,' ').eq.0) exit
     line = adjustl(line(index(line,' ')+1:))
@@ -237,6 +238,7 @@
 
    ! read the CSF
    call parse_line(line, cf, csf_vec)
+   !print *,'csf_vec=',csf_vec
 
    ! compute the norm of the csf wfn for diagnostic purposes
    csf_norm = csf_norm + cf**2
@@ -290,8 +292,10 @@
   ms2   = int(2.*m_s)
   bt    = 0
   nopen = 0
+  oopen = 0
   bvec  = 0
- 
+  aloc  = 0
+
   refdet = csf_vec
 
   do j = 1,n_occ
@@ -369,9 +373,9 @@
       case default
      end select
     enddo ! do k =1 ,nocc 
- 
+
     if(.not.zero) then
-   
+
       ! convert the determinant to multigrid format
       call convert_det(det,idet)
       ! include parity in value of cf -- necessary to compute S^2 consistently
@@ -569,12 +573,13 @@
   character*(3*n_orb)               :: ovec
 
   n_vrt = n_orb - n_intl
+!  print *,'printing: ',det
 
   write(lstr,'(i4)')3*n_orb
   ofmt = '(f15.10,1x,a'//trim(adjustl(lstr))//')'
 
   ovec = ''
-  do i = 1,n_intl
+  do i = n_extl+1,n_occ
    if(abs(det(i)).eq.1)then
     write(istr,'(sp,i3)')det(i)
    else
@@ -585,13 +590,13 @@
 
   do i = 1,n_vrt
    orb_i = n_intl + i
-   if(any(det(n_occ:)==orb_i)) then
+   if(any(det(n_occ+1:)==orb_i)) then
     dif = abs(det(n_occ+1:)-orb_i)
     ind = minloc(dif,dim=1)
-    if (abs(det(n_intl+ind)).eq.1) then
-      write(istr,'(sp,i3)')det(n_intl+ind)
+    if (abs(det(ind)).eq.1) then
+      write(istr,'(sp,i3)')det(ind)
     else
-      write(istr,'(ss,i3)')det(n_intl+ind)
+      write(istr,'(ss,i3)')det(ind)
     endif
     ovec = trim(adjustl(ovec))//adjustr(istr)
    else
