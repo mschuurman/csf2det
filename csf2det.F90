@@ -536,7 +536,7 @@
       s2 = s2 + 0.25 * det_vec(j,i) * det_vec(k,i) * det_cf(i)%val**2  ! contribution from Sz^2
 
       if(det_vec(j,i).ne.det_vec(k,i)) then
-       trial = det_vec(:,i)
+       trial    = det_vec(:,i)
        trial(j) = -trial(j)
        trial(k) = -trial(k)
        
@@ -705,12 +705,13 @@
 ! get the sign change upon putting a determinant in alpha string notation
 !
  integer function oparity(det)
-  use globaldata, only: rec_len,n_occ
+  use globaldata, only: rec_len,n_occ,n_extl
   implicit none
   integer,intent(in)           :: det(rec_len)
   integer                      :: dsort(2*n_occ)
   integer                      :: i,j,na,nb,at,nt
   integer                      :: icnt,nbnd,newbnd
+  logical                      :: sorted
 
   at = count(det(1:n_occ)==1) + count(det(1:n_occ)==2)
   nt = 0
@@ -718,8 +719,18 @@
   ! initialize n[beta] to the end of the alpha string
   nb = at 
 
-  ! loop over all the occupied orbitals 
-  do i = 1,n_occ
+  ! loop over all internal orbitals 
+  do i = n_extl+1,n_occ
+   if(any(det(i)==(/1, 2/)))then
+    nt = nt + 1;na = na + 1;dsort(nt) = na
+   endif
+   if(any(det(i)==(/-1, 2/)))then
+    nt = nt + 1;nb = nb + 1;dsort(nt) = nb
+   endif
+  enddo
+
+  ! loop over all external orbitals 
+  do i = 1,n_extl
    if(any(det(i)==(/1, 2/)))then
     nt = nt + 1;na = na + 1;dsort(nt) = na
    endif
@@ -731,24 +742,19 @@
   if(na.ne.at.or.nb.ne.nt)stop 'oparity ERROR!'
 
   oparity = 1
-  nbnd = nt
+  sorted  = .false.
 
-  do while(nbnd.gt.1)
-   newbnd = 0
-   do i = 2,nbnd
-    if(dsort(i-1).gt.dsort(i)) then
-     j = dsort(i-1)
+  do while(.not.sorted)
+   sorted = .true.
+   do i = 2,nt
+     if(dsort(i-1)<dsort(i)) cycle
+     j          = dsort(i-1)
      dsort(i-1) = dsort(i)
-     dsort(i) = j
-     oparity = -oparity
-     newbnd = i
-    endif
+     dsort(i)   = j
+     oparity    = -oparity
+     sorted     = .false. 
    enddo
-   nbnd = newbnd
   enddo
 
   return
  end function oparity
-
-
-
