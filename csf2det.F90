@@ -219,7 +219,7 @@
   ! initially allocate the determinant array to 5 * CSFs
   n_occ     = n_intl + n_extl
   rec_len   = n_intl + 2*n_extl
-  n_det_max = 5 * n_csf
+  n_det_max = 8 * n_csf
   ! initialize total number of orbitals to number of occupied
   n_orb     = n_occ
   n_det     = 0
