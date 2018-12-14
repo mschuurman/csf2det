@@ -254,6 +254,8 @@
 
   enddo
 
+  csf_norm = sqrt(csf_norm)
+  
   close(cfile)
 
   return
