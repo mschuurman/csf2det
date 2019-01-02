@@ -870,7 +870,7 @@
   call cpu_time(tcpu)
   call system_clock(cnt,cnt_rate,cnt_max)
 
-  twall                = cnt/cnt_rate
+  twall                = dble(1.*cnt/cnt_rate)
   t_list(it)%cpu_last  = tcpu
   t_list(it)%wall_last = twall
 
@@ -895,7 +895,7 @@
   call cpu_time(tcpu)
   call system_clock(cnt,cnt_rate,cnt_max)
 
-  twall                    = cnt/cnt_rate
+  twall                    = dble(1.*cnt/cnt_rate)
   t_list(it)%cpu_total     = tcpu - t_list(it)%cpu_last
   t_list(it)%wall_total    = twall - t_list(it)%wall_last
   t_list(it)%cpu_last      = tcpu
