@@ -5,6 +5,14 @@
    double precision :: val
   end type kvpair
 
+  type t_region
+   character*144    :: region_name
+   double precision :: wall_last
+   double precision :: cpu_last
+   double precision :: wall_total
+   double precision :: cpu_total
+  end type t_region
+
   ! CSF file
   character*144                             :: csf_file
   ! numerical cutoff for reading CSFs
@@ -29,7 +37,9 @@
 
   ! maximum number of determinants (for array allocation)
   integer                                   :: n_det_max
-  ! actual number of determinants
+  ! total number of determinants arising from CSF list 
+  integer                                   :: n_det_total
+  ! number of determinants in printed wfn file
   integer                                   :: n_det
   ! record length -- is nintl + 2 * next (i.e. external orbs, plus orb label)
   integer                                   :: rec_len
@@ -46,6 +56,13 @@
   ! coefficients in determinant basis
   type(kvpair),dimension(:),allocatable     :: det_cf
 
+  ! number of timers
+  integer                                   :: n_timers = 0
+  ! maximum number of timers
+  integer,parameter                         :: nt_max = 10
+  ! list of timers
+  type(t_region),dimension(10)              :: t_list
+
  end MODULE globaldata
 
 !
@@ -54,15 +71,28 @@
 !
 !
  PROGRAM csf2det 
+  implicit none
+  double precision :: norm, s2
 
   call read_cmdline()
 
+  call timer_start('parse_csf_list')
   call parse_csf_list()
+  call timer_stop('parse_csf_list')
 
+  call timer_start('expand_csfs')
   call expand_csfs()
+  call timer_stop('expand_csfs')
 
+  call timer_start('write_det_list')
   call write_det_list()
+  call timer_stop('write_det_list')
 
+  call timer_start('run_diagnostics')
+  call run_diagnostics(norm, s2)
+  call timer_stop('run_diagnostics')
+
+  call print_summary(norm,s2)
   call cleanup()
 
  end PROGRAM csf2det
@@ -230,9 +260,9 @@
   rec_len   = n_intl + 2*n_extl
   n_det_max = 8 * n_csf
   ! initialize total number of orbitals to number of occupied
-  n_orb     = n_occ
-  n_det     = 0
-  csf_norm  = 0.
+  n_orb       = n_occ
+  n_det_total = 0
+  csf_norm    = 0.
   allocate(csf_vec(rec_len,n_csf))
   allocate(csf_cf(n_csf))
   allocate(det_vec(rec_len,n_det_max))
@@ -400,7 +430,7 @@
        cf = sqrt(cf)*sgn
 
        found = 0
-       do k = 1,n_det
+       do k = 1,n_det_total
         if(all(det_vec(:,k).eq.idet))then
            found = k
           exit
@@ -412,12 +442,12 @@
        if(found.ne.0)then
          det_cf(found)%val = det_cf(found)%val + cf*csf_cf(icsf)*phase(found)
        else
-        n_det = n_det + 1
-        if(n_det.gt.n_det_max) stop 'ndet .gt. numdet, increase rdet2csf'
-        phase(n_det)      = oparity(idet)
-        det_cf(n_det)%ind = n_det
-        det_cf(n_det)%val = cf*csf_cf(icsf)*phase(n_det)
-        det_vec(:,n_det)  = idet
+        n_det_total = n_det_total + 1
+        if(n_det_total.gt.n_det_max) stop 'ndet .gt. numdet, increase rdet2csf'
+        phase(n_det_total)      = oparity(idet)
+        det_cf(n_det_total)%ind = n_det_total
+        det_cf(n_det_total)%val = cf*csf_cf(icsf)*phase(n_det_total)
+        det_vec(:,n_det_total)  = idet
        endif
  
      endif !if(.not.zero) 
@@ -439,40 +469,61 @@
  subroutine write_det_list
   use globaldata
   implicit none
-  integer            :: i, n_print
-  integer            :: ofile=99
-  double precision   :: norm,s2
 
-  if(n_det.eq.0)return
+  if(n_det_total.eq.0)return
 
   ! sort so determinants printed largest coefficient to smallest
   call sort_det_list()
 
   ! print determinants
-  i = 1 
-  do while(abs(det_cf(i)%val).gt.det_min)
-   call print_det(det_cf(i)%val,det_vec(:,det_cf(i)%ind))
-   i = i + 1
-   if(i.gt.n_det)exit
+  n_det = 1 
+  do while(abs(det_cf(n_det)%val).gt.det_min)
+   call print_det(det_cf(n_det)%val,det_vec(:,det_cf(n_det)%ind))
+   n_det = n_det + 1
+   if(n_det.gt.n_det_total)exit
   enddo
-  n_print = i-1
+  n_det = n_det - 1
+
+  return
+ end subroutine write_det_list
+
+!
+! print diagnostics of the determinatn list
+!
+ subroutine run_diagnostics(norm, s2)
+  use globaldata
+  implicit none
+  double precision,intent(out) :: norm, s2
 
   ! compute S^2 and norm -- should only include determinants that are printed, hence 'n_print'
-  call compute_norm_s2(n_print, norm, s2)
- 
+  call compute_norm_s2(n_det, norm, s2)
+
+ end subroutine run_diagnostics 
+
+!
+!
+! 
+ subroutine print_summary(norm, s2)
+  use globaldata
+  implicit none
+  double precision, intent(in) :: norm, s2
+  integer                      :: ofile=99
+
   ! not sure how to best handle this.  For the time being, useful to check
   ! wavefunction norm and S^2 to make sure cutoff is not too severe.
   open(unit=ofile,file='csf2det.out',status='replace')
-  write(ofile,1000)csf_norm
-  write(ofile,1001)norm
-  write(ofile,1002)s2
-  close(ofile)  
+  write(ofile,"(' Diagnostic Report')")
+  write(ofile,"(' -----------------')")
+  write(ofile,"(' Norm of wfn in CSF basis: ',f15.10)")csf_norm
+  write(ofile,"(' Norm of wfn in det basis: ',f15.10)")norm
+  write(ofile,"(' <S^2>:                    ',f15.4)")s2
+
+  call print_timer(ofile)
+  close(ofile)
 
   return
-1000 format('norm of wfn in CSF basis: ',f15.10)
-1001 format('norm of wfn in det basis: ',f15.10)
-1002 format('S^2: ',f8.4)
- end subroutine write_det_list
+ end subroutine print_summary
+
 
 !
 ! deallocate dynamic memory arrays
@@ -481,6 +532,8 @@
   use globaldata
   implicit none
 
+  deallocate(csf_vec)
+  deallocate(csf_cf)
   deallocate(det_vec)
   deallocate(det_cf)
 
@@ -539,46 +592,48 @@
    integer,intent(in)           :: n
    double precision,intent(out) :: norm
    double precision, intent(out):: s2
-   integer                      :: bra_i, bra_ind, ket_i, ket_ind
-   integer                      :: orb_i, orb_j
+   integer                      :: ibra, braloc, iket, ketloc
+   integer                      :: iorb, jorb
    integer                      :: bra(rec_len), ket(rec_len)
    integer                      :: trial(rec_len)
    double precision             :: bra_cf, ket_cf
 
    !$omp parallel default(none) &
-   !$omp&         shared(n,det_vec,det_cf,n_occ,phase) private(ket_i,bra_i,orb_i,orb_j,bra,ket,bra_cf,ket_cf) reduction(+:s2,norm)
+   !$omp& shared(n,det_vec,det_cf,n_occ,phase) private(iket,ibra,iorb,jorb,braloc,ketloc) &
+   !$omp& private(trial,bra,ket,bra_cf,ket_cf) reduction(+:s2,norm)
    s2   = 0.
    norm = 0.
+
    !$omp do
-   loop_ket: do ket_i = 1,n
-    ket_ind = det_cf(ket_i)%ind
-    ket     = det_vec(:,ket_ind)
-    ket_cf  = det_cf(ket_i)%val
+   loop_ket: do iket = 1,n
+    ketloc = det_cf(iket)%ind
+    ket    = det_vec(:,ketloc)
+    ket_cf = det_cf(iket)%val
     norm = norm + ket_cf**2
 
-    scan_orbi: do orb_i = 1,n_occ
-     if(abs(ket(orb_i)).ne.1)cycle scan_orbi
+    scan_orbi: do iorb = 1,n_occ
+     if(abs(ket(iorb)).ne.1)cycle scan_orbi
      s2 = s2 + 0.5 * ket_cf**2 ! diagonal contribution of the ladder operators
 
-     scan_orbj: do orb_j = 1,n_occ
-      if(abs(ket(orb_j)).ne.1) cycle scan_orbj
-      s2 = s2 + 0.25 * ket(orb_i) * ket(orb_j) * ket_cf**2 ! contribution from Sz^2
+     scan_orbj: do jorb = 1,n_occ
+      if(abs(ket(jorb)).ne.1) cycle scan_orbj
+      s2 = s2 + 0.25 * ket(iorb) * ket(jorb) * ket_cf**2 ! contribution from Sz^2
 
-      if(ket(orb_i).ne.ket(orb_j)) then
-       trial        =  ket
-       trial(orb_i) = -trial(orb_i)
-       trial(orb_j) = -trial(orb_j)
+      if(ket(iorb).ne.ket(jorb)) then
+       trial       =  ket
+       trial(iorb) = -trial(iorb)
+       trial(jorb) = -trial(jorb)
        
-       scan_bra: do bra_i = 1,n
-        bra_ind = det_cf(bra_i)%ind
-        bra     = det_vec(:,bra_ind)
-        bra_cf  = det_cf(bra_i)%val 
+       scan_bra: do ibra = 1,n
+        braloc = det_cf(ibra)%ind
+        bra    = det_vec(:,braloc)
+        bra_cf = det_cf(ibra)%val 
 
         ! we're looking for trial in the det list..
         if(any(bra.ne.trial)) then
           cycle scan_bra
         else
-          s2 = s2 + 0.5 * ket_cf * bra_cf * phase(ket_ind) * phase(bra_ind)
+          s2 = s2 + 0.5 * ket_cf * bra_cf * phase(ketloc) * phase(braloc)
           exit ! each determinant in the list is unique, exit loop if we find right one.
         endif
 
@@ -796,3 +851,108 @@
 
   return
  end function oparity
+
+!
+!
+!
+ subroutine timer_start(reg_name)
+  use globaldata
+  implicit none
+  character(len=*),intent(in) :: reg_name
+  character*144               :: label
+  double precision            :: tcpu, twall
+  integer                     :: cnt, cnt_rate, cnt_max
+  integer                     :: it, timer_pos
+
+  label = trim(adjustl(reg_name))
+
+  it = timer_pos(label)
+  call cpu_time(tcpu)
+  call system_clock(cnt,cnt_rate,cnt_max)
+
+  twall                = cnt/cnt_rate
+  t_list(it)%cpu_last  = tcpu
+  t_list(it)%wall_last = twall
+
+ end subroutine timer_start
+
+!
+!
+!
+ subroutine timer_stop(reg_name)
+  use globaldata
+  implicit none
+  character(len=*),intent(in) :: reg_name
+  character*144               :: label
+  double precision            :: tcpu, twall
+  integer                     :: cnt, cnt_rate, cnt_max
+  integer                     :: it, timer_pos
+
+  label = trim(adjustl(reg_name))
+
+  it = timer_pos(label)
+
+  call cpu_time(tcpu)
+  call system_clock(cnt,cnt_rate,cnt_max)
+
+  twall                    = cnt/cnt_rate
+  t_list(it)%cpu_total     = tcpu - t_list(it)%cpu_last
+  t_list(it)%wall_total    = twall - t_list(it)%wall_last
+  t_list(it)%cpu_last      = tcpu
+  t_list(it)%wall_last     = twall
+ end subroutine timer_stop
+
+!
+!
+!
+ subroutine print_timer(ofile)
+  use globaldata
+  implicit none
+  integer,intent(in)   :: ofile
+  integer              :: i
+  double precision     :: total_cpu, total_wall
+  
+  total_cpu = 0.
+  total_wall = 0.
+
+  write(ofile,"('')")
+  write(ofile,"(' Timing Report')")
+  write(ofile,"(' -------------')")
+  write(ofile,"(50x,'  CPU time',4x,' Real time (seconds)')")
+  do i = 1,n_timers
+    write(ofile,"(1x,a35,f24.2,f24.2)")adjustl(t_list(i)%region_name), t_list(i)%cpu_total, t_list(i)%wall_total
+    total_cpu  = total_cpu  + t_list(i)%cpu_total
+    total_wall = total_wall + t_list(i)%wall_total
+  enddo
+  write(ofile,"(' -----------------------------------------------------------------------------------')")
+  write(ofile,"(1x,a5,30x,f24.2,f24.2)")'Total',total_cpu,total_wall
+
+  return
+ end subroutine print_timer
+ 
+!
+!
+!
+ function timer_pos(label)
+  use globaldata
+  implicit none
+  character*144       :: label
+  integer             :: timer_pos
+  logical             :: found
+ 
+  found      = .false.
+  timer_pos = 1
+  do while (.not.found.and.timer_pos.le.n_timers)
+    if(t_list(timer_pos)%region_name == adjustl(label)) then
+      found = .true.
+      exit
+    endif
+    timer_pos = timer_pos + 1
+  enddo
+
+  if(.not.found) then
+   n_timers = n_timers + 1
+   t_list(timer_pos)%region_name = adjustl(label)
+  endif
+
+ end function timer_pos

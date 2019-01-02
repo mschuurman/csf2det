@@ -4,7 +4,7 @@
 ################################################
 
 FC = gfortran 
-FFLAGS = -fbounds-check 
+FFLAGS = -fbounds-check -fopenmp 
 SRCS = csf2det.F90
 OBJS = csf2det.o
 EXEC = csf2det.x
