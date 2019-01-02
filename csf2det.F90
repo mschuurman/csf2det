@@ -14,6 +14,8 @@
   ! value of Ms for determinants/csfs
   double precision                          :: m_s
 
+  ! number of csfs to expand
+  integer                                   :: n_csf
   ! norm of the wavefunction in CSF basis
   double precision                          :: csf_norm
   ! number of internal orbitals, including frozen
@@ -32,8 +34,15 @@
   ! record length -- is nintl + 2 * next (i.e. external orbs, plus orb label)
   integer                                   :: rec_len
 
+  ! vector in which to store the csfs
+  integer,dimension(:,:),allocatable        :: csf_vec
+  ! coefficients for each csf
+  double precision,dimension(:),allocatable :: csf_cf
+
   ! vector in which to store representation of corresponding determinants
   integer,dimension(:,:),allocatable        :: det_vec
+  ! phase factor that results from putting determinant into alpha-string notation
+  integer,dimension(:),allocatable          :: phase
   ! coefficients in determinant basis
   type(kvpair),dimension(:),allocatable     :: det_cf
 
@@ -49,6 +58,8 @@
   call read_cmdline()
 
   call parse_csf_list()
+
+  call expand_csfs()
 
   call write_det_list()
 
@@ -103,17 +114,18 @@
 !
 !
 !
- subroutine parse_line(line, cf, csf_vec)
+ subroutine parse_line(line, cf, step)
   use globaldata
   implicit none
   character*144, intent(inout) :: line
-  real, intent(out)            :: cf
-  integer, intent(out)         :: csf_vec(rec_len)
+  double precision, intent(out):: cf
+  integer,intent(out)          :: step(rec_len)
   character*20                 :: str
   integer                      :: ni,ne
 
   line = adjustl(line)
   str  = line(1:index(line,' ')-1)
+  step = 0
   read(str,*)cf
 
   if (abs(cf).lt.csf_min) then
@@ -125,18 +137,17 @@
   line  = line(index(line,' ')+1:)
   ni      = 0
   ne      = 0
-  csf_vec = 0
   do while (len(trim(line)).gt.0)
     str = line(1:index(line,' ')-1)
     if(index(str,':').ne.0) then
      ne = ne + 1
-     read(str(1:index(str,':')-1),*)csf_vec(n_occ+ne) 
+     read(str(1:index(str,':')-1),*)step(n_occ+ne) 
      line = adjustl(line(index(line,' ')+1:))
      str = line(1:index(line,' ')-1)
-     read(str,*)csf_vec(ne)
+     read(str,*)step(ne)
     else
      ni = ni + 1
-     read(str,*)csf_vec(n_extl+ni)
+     read(str,*)step(n_extl+ni)
     endif
     if (index(line,' ').eq.0) exit
     line = adjustl(line(index(line,' ')+1:))
@@ -155,13 +166,11 @@
   use globaldata
   implicit none
   integer                :: ios
-  integer                :: n_csf
-  integer,allocatable    :: csf_vec(:)
   integer                :: cfile=99
-  integer                :: orb_occ
-  real                   :: cf
+  integer                :: orb_occ, icsf
   character*144          :: line
   character*20           :: str
+  double precision       :: cf
   real,dimension(0:3)    :: spin = (/0.0, 0.5, -0.5, 0.0/)
 
   ! open the csf file --
@@ -174,7 +183,7 @@
 
   ! get the number of CSFs in the file
   n_csf=0
-  do 
+  scan_csf_list: do 
    read(cfile, 1000, iostat=ios)line
    if(ios.lt.0)exit
 
@@ -198,7 +207,7 @@
     n_intl = 0
     n_extl = 0 
     m_s    = 0.
-    do while (len(trim(adjustl(line))).gt.0) 
+    scan_csf: do while (len(trim(adjustl(line))).gt.0) 
       str = line(1:index(line,' ')-1)
       if(index(str,':').ne.0) then
        n_extl = n_extl + 1
@@ -212,9 +221,9 @@
       m_s = m_s + spin(orb_occ)
       if (index(line,' ').eq.0) exit
       line = adjustl(line(index(line,' ')+1:))
-    enddo
+    enddo scan_csf
    endif
-  enddo
+  enddo scan_csf_list
 
   ! initially allocate the determinant array to 5 * CSFs
   n_occ     = n_intl + n_extl
@@ -224,35 +233,37 @@
   n_orb     = n_occ
   n_det     = 0
   csf_norm  = 0.
-  allocate(csf_vec(rec_len))
+  allocate(csf_vec(rec_len,n_csf))
+  allocate(csf_cf(n_csf))
   allocate(det_vec(rec_len,n_det_max))
   allocate(det_cf(n_det_max))
+  allocate(phase(n_det_max))
 
   ! go back to the beginning of the file
   rewind(cfile)
 
-  do
+  icsf = 0
+  csf_norm = 0.
+  read_csf_list: do
    read(cfile, 1000, iostat=ios)line
    if(ios.lt.0)exit
    if(ios.gt.0)stop 'error reading csf_file'
 
    ! read the CSF
-   call parse_line(line, cf, csf_vec)
+   icsf = icsf + 1
+   call parse_line(line, csf_cf(icsf), csf_vec(:,icsf))
    !print *,'csf_vec=',csf_vec
 
    ! compute the norm of the csf wfn for diagnostic purposes
-   csf_norm = csf_norm + cf**2
+   csf_norm = csf_norm + csf_cf(icsf)**2
 
    ! if the returned coefficient is zero, we've read all csfs less than cutoff
-   if (cf == 0.) exit
+   if (icsf == n_csf) exit
 
    ! check the external orbital index: update n_orb if necessary
-   n_orb = max(n_orb, maxval(csf_vec(n_occ:)))
+   n_orb = max(n_orb, maxval(csf_vec(n_occ:,icsf)))
 
-   ! else, convert the csf to a linear combination of determinants
-   call unroll_csf(cf, csf_vec)  
-
-  enddo
+  enddo read_csf_list
 
   csf_norm = sqrt(csf_norm)
   
@@ -267,18 +278,16 @@
 !  Project out the contribution of allowed determinants from a CSF
 !
 !
- subroutine unroll_csf(csf_cf, csf_vec)
+ subroutine expand_csfs()
   use globaldata
   implicit none
-  real, intent(in)    :: csf_cf
-  integer, intent(in) :: csf_vec(rec_len)
  
   integer             :: db(4),mz2(2),d1f(2),d2f(2),del(2)
   integer             :: num,denom,sgn
-  integer             :: j,k,l,icnt,bt,found
+  integer             :: icsf,j,k,l,icnt,bt,found
   integer             :: ms2,m2,nalpha,nopen,nloops
   integer             :: bvec(n_occ),aloc(n_occ),oopen(n_occ)
-  integer             :: idet(rec_len),det(rec_len),refdet(rec_len)
+  integer             :: idet(rec_len),det(rec_len),ref_det(rec_len)
   double precision    :: cf
   logical             :: zero
   integer             :: ifac
@@ -290,124 +299,137 @@
   d1f = (/ 1, -1 /)
   d2f = (/-1,  1 /) 
   del = (/ 1,  0 /)
-
   ms2   = int(2.*m_s)
-  bt    = 0
-  nopen = 0
-  oopen = 0
-  bvec  = 0
-  aloc  = 0
 
-  refdet = csf_vec
+  loop_csf_array: do icsf = 1,n_csf
+  
+   bt    = 0
+   nopen = 0
+   oopen = 0
+   bvec  = 0
+   aloc  = 0
+   ref_det = csf_vec(:,icsf)
 
-  do j = 1,n_occ
-   bt = bt + db(csf_vec(j)+1)
-   bvec(j) = bt
-   if(csf_vec(j).eq.1.or.csf_vec(j).eq.2)then
-    nopen = nopen + 1
-    oopen(nopen) = j
-    refdet(j) = 2
-   endif
-  enddo !do j = 1,nocc
+!   print *,''
+!   write(*,1002)csf_vec(:,icsf)
+!   print *,'-----------------------------------'
  
-  ! set alpha spin counter
-  nalpha = (ms2 + nopen)/2
-  do j = 1,nalpha
-   aloc(j) = j
-  enddo
-  if(nalpha.gt.0)aloc(nalpha) = aloc(nalpha)-1
-  nloops = ifac(nopen)/(ifac(nalpha)*ifac(nopen-nalpha))
+   do j = 1,n_occ
+    bt = bt + db(csf_vec(j,icsf)+1)
+     bvec(j) = bt
+    if(csf_vec(j,icsf).eq.1.or.csf_vec(j,icsf).eq.2)then
+     nopen = nopen + 1
+     oopen(nopen) = j
+     ref_det(j) = 2
+    endif
+   enddo !do j = 1,nocc
+ 
+   ! set alpha spin counter
+   nalpha = (ms2 + nopen)/2
+   do j = 1,nalpha
+    aloc(j) = j
+   enddo
+   if(nalpha.gt.0)aloc(nalpha) = aloc(nalpha)-1
+   nloops = ifac(nopen)/(ifac(nalpha)*ifac(nopen-nalpha))
 
-  !
-  !loop over the allowed determinants
-  !
-  do j = 1,nloops
-   det = refdet
+   !
+   !loop over the allowed determinants
+   !
+   do j = 1,nloops
+    det = ref_det
+ 
+    if(nalpha.gt.0)then
+     ! loop over all perumtations of alpha/beta occupations
+     icnt = nalpha
+     do while(aloc(icnt) .eq. (nopen-nalpha+icnt))
+      icnt = icnt - 1
+     enddo
+     aloc(icnt) = aloc(icnt) + 1
+     do k = icnt+1,nalpha
+       aloc(k) = aloc(icnt)+k-icnt
+     enddo
+ 
+     ! set selected unpaired electrons to alpha spin
+     do k = 1,nalpha
+      det(oopen(aloc(k)))=1
+     enddo
+    endif
+ 
+    ! determine the projection of the determinant on the CSF
+    cf   = 1.
+    sgn  = 1
+    m2   = 0
+    zero = .false.
+    do k = 1,n_occ
+     select case(csf_vec(k,icsf))
+  
+       case(1)
+         m2 = m2 + mz2(det(k))
+         num = bvec(k) + d1f(det(k)) * m2
+         if(num == 0)then
+          zero = .true.
+          exit
+          endif
+         denom = 2 * bvec(k) 
+         cf = cf * num / denom
+ 
+       case(2)
+         m2 = m2 + mz2(det(k))
+         num = bvec(k) + 2 + d2f(det(k)) * m2
+         if(num == 0)then
+          zero = .true.
+           exit
+         endif
+         denom = 2 * (bvec(k) + 2)
+         sgn = sgn * (-1)**(bvec(k)+del(det(k)))
+         cf = cf * num / denom
+ 
+       case(3)
+         sgn = sgn * (-1)**(bvec(k))
+ 
+       case default
+      end select
+     enddo ! do k =1 ,nocc 
+ 
+     if(.not.zero) then
+ 
+       ! convert the determinant to multigrid format
+       call convert_det(det,idet)
+       ! include parity in value of cf -- necessary to compute S^2 consistently
+       if(cf.lt.0)stop 'ERROR computing determinant'
+       cf = sqrt(cf)*sgn
 
-   if(nalpha.gt.0)then
-    ! loop over all perumtations of alpha/beta occupations
-    icnt = nalpha
-    do while(aloc(icnt) .eq. (nopen-nalpha+icnt))
-     icnt = icnt - 1
-    enddo
-    aloc(icnt) = aloc(icnt) + 1
-    do k = icnt+1,nalpha
-      aloc(k) = aloc(icnt)+k-icnt
-    enddo
-
-    ! set selected unpaired electrons to alpha spin
-    do k = 1,nalpha
-     det(oopen(aloc(k)))=1
-    enddo
-   endif
-
-   cf = 1.
-   sgn = 1
-   m2 = 0
-   zero = .false.
-   do k = 1,n_occ
-    select case(csf_vec(k))
-
-      case(1)
-        m2 = m2 + mz2(det(k))
-        num = bvec(k) + d1f(det(k)) * m2
-        if(num == 0)then
-         zero = .true.
-         exit
+       found = 0
+       do k = 1,n_det
+        if(all(det_vec(:,k).eq.idet))then
+           found = k
+          exit
         endif
-        denom = 2 * bvec(k) 
-        cf = cf * num / denom
-
-      case(2)
-        m2 = m2 + mz2(det(k))
-        num = bvec(k) + 2 + d2f(det(k)) * m2
-        if(num == 0)then
-         zero = .true.
-         exit
-        endif
-        denom = 2 * (bvec(k) + 2)
-        sgn = sgn * (-1)**(bvec(k)+del(det(k)))
-        cf = cf * num / denom
-
-      case(3)
-        sgn = sgn * (-1)**(bvec(k))
-
-      case default
-     end select
-    enddo ! do k =1 ,nocc 
-
-    if(.not.zero) then
-
-      ! convert the determinant to multigrid format
-      call convert_det(det,idet)
-      ! include parity in value of cf -- necessary to compute S^2 consistently
-      if(cf.lt.0)stop 'ERROR computing determinant'
-      cf = sqrt(cf)*sgn*oparity(idet)
-
-      found = 0
-      do k = 1,n_det
-       if(all(det_vec(:,k).eq.idet))then
-         found = k
-         exit
+       enddo
+ 
+!       write(*,1001)cf/oparity(idet)
+!       write(*,1002)idet
+       if(found.ne.0)then
+         det_cf(found)%val = det_cf(found)%val + cf*csf_cf(icsf)*phase(found)
+       else
+        n_det = n_det + 1
+        if(n_det.gt.n_det_max) stop 'ndet .gt. numdet, increase rdet2csf'
+        phase(n_det)      = oparity(idet)
+        det_cf(n_det)%ind = n_det
+        det_cf(n_det)%val = cf*csf_cf(icsf)*phase(n_det)
+        det_vec(:,n_det)  = idet
        endif
-      enddo
+ 
+     endif !if(.not.zero) 
+    enddo !do j = 1,nloops
 
-      if(found.ne.0)then
-       det_cf(found)%val = det_cf(found)%val + cf*csf_cf
-      else
-       n_det = n_det + 1
-       if(n_det.gt.n_det_max) stop 'ndet .gt. numdet, increase rdet2csf'
-       det_cf(n_det)%ind = n_det
-       det_cf(n_det)%val = cf*csf_cf
-       det_vec(:,n_det)  = idet
-      endif
-
-    endif !if(.not.zero) 
-   enddo !do j = 1,nloops
+   enddo loop_csf_array
 
   return
 1000 format(20(i3))
- end subroutine unroll_csf 
+1001 format(f18.12)
+1002 format(40(i3))
+ end subroutine expand_csfs 
 
 
 !
@@ -417,7 +439,7 @@
  subroutine write_det_list
   use globaldata
   implicit none
-  integer            :: i
+  integer            :: i, n_print
   integer            :: ofile=99
   double precision   :: norm,s2
 
@@ -433,9 +455,10 @@
    i = i + 1
    if(i.gt.n_det)exit
   enddo
+  n_print = i-1
 
-  ! compute S^2 and norm
-  call compute_norm_s2(norm, s2)
+  ! compute S^2 and norm -- should only include determinants that are printed, hence 'n_print'
+  call compute_norm_s2(n_print, norm, s2)
  
   ! not sure how to best handle this.  For the time being, useful to check
   ! wavefunction norm and S^2 to make sure cutoff is not too severe.
@@ -510,48 +533,62 @@
 !
 !  compute effect of S2 operator on a single determinant
 !
-  subroutine compute_norm_s2(norm,s2)
-   use globaldata, only: rec_len,n_occ,n_det,det_cf,det_vec
+  subroutine compute_norm_s2(n, norm, s2)
+   use globaldata, only: rec_len,n_occ,det_cf,det_vec,phase
    implicit none
+   integer,intent(in)           :: n
    double precision,intent(out) :: norm
    double precision, intent(out):: s2
-   integer                      :: i,j,k,l
+   integer                      :: bra_i, bra_ind, ket_i, ket_ind
+   integer                      :: orb_i, orb_j
+   integer                      :: bra(rec_len), ket(rec_len)
    integer                      :: trial(rec_len)
-   integer                      :: par(n_det)
-   integer                      :: oparity
+   double precision             :: bra_cf, ket_cf
 
-   s2 = 0.
+   !$omp parallel default(none) &
+   !$omp&         shared(n,det_vec,det_cf,n_occ,phase) private(ket_i,bra_i,orb_i,orb_j,bra,ket,bra_cf,ket_cf) reduction(+:s2,norm)
+   s2   = 0.
    norm = 0.
- 
-   do i = 1,n_det
-    par(i) = oparity(det_vec(:,i))
-   enddo
+   !$omp do
+   loop_ket: do ket_i = 1,n
+    ket_ind = det_cf(ket_i)%ind
+    ket     = det_vec(:,ket_ind)
+    ket_cf  = det_cf(ket_i)%val
+    norm = norm + ket_cf**2
 
-   do i = 1,n_det
-    norm = norm + det_cf(i)%val**2
-    do j = 1,n_occ
-     if(abs(det_vec(j,i)).ne.1)cycle
-     s2 = s2 + 0.5 * det_cf(i)%val**2 ! diagonal contribution of the ladder operators
+    scan_orbi: do orb_i = 1,n_occ
+     if(abs(ket(orb_i)).ne.1)cycle scan_orbi
+     s2 = s2 + 0.5 * ket_cf**2 ! diagonal contribution of the ladder operators
 
-     do k = 1,n_occ
-      if(abs(det_vec(k,i)).ne.1) cycle
-      s2 = s2 + 0.25 * det_vec(j,i) * det_vec(k,i) * det_cf(i)%val**2  ! contribution from Sz^2
+     scan_orbj: do orb_j = 1,n_occ
+      if(abs(ket(orb_j)).ne.1) cycle scan_orbj
+      s2 = s2 + 0.25 * ket(orb_i) * ket(orb_j) * ket_cf**2 ! contribution from Sz^2
 
-      if(det_vec(j,i).ne.det_vec(k,i)) then
-       trial    = det_vec(:,i)
-       trial(j) = -trial(j)
-       trial(k) = -trial(k)
+      if(ket(orb_i).ne.ket(orb_j)) then
+       trial        =  ket
+       trial(orb_i) = -trial(orb_i)
+       trial(orb_j) = -trial(orb_j)
        
-       do l = 1,n_det
-        if(any(det_vec(:,l).ne.trial)) cycle
- 
-        s2 = s2 + 0.5 * det_cf(i)%val * det_cf(l)%val * par(i) * par(l)
+       scan_bra: do bra_i = 1,n
+        bra_ind = det_cf(bra_i)%ind
+        bra     = det_vec(:,bra_ind)
+        bra_cf  = det_cf(bra_i)%val 
 
-       enddo ! end l = 1,ndet
+        ! we're looking for trial in the det list..
+        if(any(bra.ne.trial)) then
+          cycle scan_bra
+        else
+          s2 = s2 + 0.5 * ket_cf * bra_cf * phase(ket_ind) * phase(bra_ind)
+          exit ! each determinant in the list is unique, exit loop if we find right one.
+        endif
+
+       enddo scan_bra ! end l = 1,ndet
       endif ! if(det(i,j)!=det(i,k)
-     enddo ! k = 1,norb
-    enddo ! j = 1,norb
-   enddo ! i = 1,ndet
+     enddo scan_orbj ! k = 1,norb
+    enddo scan_orbi! j = 1,norb
+   enddo loop_ket ! i = 1,ndet
+  !$omp end do
+  !$omp end parallel
 
    norm = sqrt(norm)
 
@@ -745,11 +782,10 @@
 
   oparity = 1
   sorted  = .false.
-
   do while(.not.sorted)
    sorted = .true.
    do i = 2,nt
-     if(dsort(i-1)<dsort(i)) cycle
+     if(dsort(i-1) < dsort(i)) cycle
      j          = dsort(i-1)
      dsort(i-1) = dsort(i)
      dsort(i)   = j
