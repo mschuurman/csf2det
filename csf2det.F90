@@ -316,9 +316,6 @@
   ms2     = int(2.*m_s)
   det_cnt = 0
   
-  !$omp master
-  call timer_start('generate determinant list')
-  !$omp end master
   !$omp do
   loop_csf_array: do icsf = 1,n_csf
 
@@ -408,19 +405,29 @@
  
      if(.not.zero) then
 
-       ! add another determinant to the list
-       det_cnt = det_cnt + 1
-
        ! convert the determinant to multigrid format
-       call convert_det(step_det,multi_det)
+        call convert_det(step_det,multi_det)
 
        ! include parity in value of cf -- necessary to compute S^2 consistently
        if(cf.lt.0)stop 'ERROR computing determinant'
-       cf = sqrt(cf)*sgn
+       cf = sqrt(cf)*sgn*csf_cf(icsf)
 
-       phase_loc(det_cnt) = oparity(multi_det)
-       cf_loc(det_cnt)    = csf_cf(icsf)*cf*phase_loc(det_cnt)
-       vec_loc(:,det_cnt) = multi_det
+       ! scan local list to see if vector already stored
+       found = .false.
+       scan_detlist: do k = 1,det_cnt
+        if (any(multi_det.ne.vec_loc(:,k))) cycle scan_detlist
+        found = .true.
+        exit
+       enddo scan_detlist
+
+       if(found) then
+        cf_loc(k)          = cf_loc(k) + cf*phase_loc(k)
+       else
+        det_cnt            = det_cnt + 1
+        vec_loc(:,det_cnt) = multi_det
+        phase_loc(det_cnt) = oparity(multi_det)
+        cf_loc(det_cnt)    = cf*phase_loc(det_cnt)
+       endif
 
      endif !if(.not.zero) 
     enddo !do j = 1,nloops
@@ -434,11 +441,11 @@
  
     ! scan master list to see if vector already stored
     found = .false.
-    scan_detlist: do k = 1,ndet_all
-     if (any(multi_det.ne.det_vec(:,k))) cycle scan_detlist
+    scan_loclist: do k = 1,ndet_all
+     if (any(multi_det.ne.det_vec(:,k))) cycle scan_loclist
      found = .true.
      exit
-    enddo scan_detlist
+    enddo scan_loclist
 
     if(found) then
      det_cf(k)%val = det_cf(k)%val + cf_loc(j)
