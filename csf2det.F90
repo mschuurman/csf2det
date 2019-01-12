@@ -1,4 +1,4 @@
- MODULE globaldata
+ MODULE csf2det
  
   type kvpair 
    integer          :: ind
@@ -35,26 +35,31 @@
   ! total number of orbitals in basis
   integer                                   :: n_orb
 
-  ! maximum number of determinants (for array allocation)
-  integer                                   :: n_det_max
-  ! total number of determinants arising from CSF list 
-  integer                                   :: n_det_total
-  ! number of determinants in printed wfn file
-  integer                                   :: n_det
   ! record length -- is nintl + 2 * next (i.e. external orbs, plus orb label)
   integer                                   :: rec_len
-
   ! vector in which to store the csfs
   integer,dimension(:,:),allocatable        :: csf_vec
   ! coefficients for each csf
   double precision,dimension(:),allocatable :: csf_cf
 
-  ! vector in which to store representation of corresponding determinants
-  integer,dimension(:,:),allocatable        :: det_vec
-  ! phase factor that results from putting determinant into alpha-string notation
-  integer,dimension(:),allocatable          :: phase
-  ! coefficients in determinant basis
-  type(kvpair),dimension(:),allocatable     :: det_cf
+  ! maximum number of determinants, i.e. size of allocated arrays
+  integer                                    :: ndet_max = 0
+  ! total number of determinants that we've read/generated
+  integer                                    :: ndet_all = 0
+  ! number of determinants to be printed to wavefunction file
+  integer                                    :: n_det = 0
+  ! vector to store the determinants
+  integer,dimension(:,:),allocatable         :: det_vec
+  ! determinant coefficients: a scalar real value, and a sorting index
+  ! to make sorting by magnitude simpler/more efficient
+  type(kvpair),dimension(:),allocatable      :: det_cf
+  ! the associated phase to bring determinant into alpha-string notation
+  ! which is required by superdyson
+  integer,dimension(:),allocatable           :: det_phase
+  ! norm of determinantal wfn
+  double precision                           :: det_norm
+  ! <S^2>
+  double precision                           :: det_s2
 
   ! number of timers
   integer                                   :: n_timers = 0
@@ -63,45 +68,12 @@
   ! list of timers
   type(t_region),dimension(10)              :: t_list
 
- end MODULE globaldata
-
-!
-! Program: CSF2DET 
-!          -- convert a CI expansion in CSFs to one in determinants
-!
-!
- PROGRAM csf2det 
-  implicit none
-  double precision :: norm, s2
-
-  call read_cmdline()
-
-  call timer_start('parse_csf_list')
-  call parse_csf_list()
-  call timer_stop('parse_csf_list')
-
-  call timer_start('expand_csfs')
-  call expand_csfs()
-  call timer_stop('expand_csfs')
-
-  call timer_start('write_det_list')
-  call write_det_list()
-  call timer_stop('write_det_list')
-
-  call timer_start('run_diagnostics')
-  call run_diagnostics(norm, s2)
-  call timer_stop('run_diagnostics')
-
-  call print_summary(norm,s2)
-  call cleanup()
-
- end PROGRAM csf2det
+ contains
 
 !******************************************************
 ! INITIALIZATION ROUTINES
 !******************************************************
  subroutine read_cmdline()
-  use globaldata, only: csf_file,csf_min,det_min
   implicit none
   integer                   :: n_arg, i_arg
   character*144             :: abuf
@@ -145,7 +117,6 @@
 !
 !
  subroutine parse_line(line, cf, step)
-  use globaldata
   implicit none
   character*144, intent(inout) :: line
   double precision, intent(out):: cf
@@ -193,7 +164,6 @@
 !      2. figure out how many CSFs there are
 !
  subroutine parse_csf_list()
-  use globaldata
   implicit none
   integer                :: ios
   integer                :: cfile=99
@@ -258,16 +228,10 @@
   ! initially allocate the determinant array to 5 * CSFs
   n_occ     = n_intl + n_extl
   rec_len   = n_intl + 2*n_extl
-  n_det_max = 8 * n_csf
-  ! initialize total number of orbitals to number of occupied
   n_orb       = n_occ
-  n_det_total = 0
   csf_norm    = 0.
   allocate(csf_vec(rec_len,n_csf))
   allocate(csf_cf(n_csf))
-  allocate(det_vec(rec_len,n_det_max))
-  allocate(det_cf(n_det_max))
-  allocate(phase(n_det_max))
 
   ! go back to the beginning of the file
   rewind(cfile)
@@ -309,41 +273,62 @@
 !
 !
  subroutine expand_csfs()
-  use globaldata
   implicit none
- 
   integer             :: db(4),mz2(2),d1f(2),d2f(2),del(2)
-  integer             :: num,denom,sgn
-  integer             :: icsf,j,k,l,icnt,bt,found
+  integer             :: num, denom, sgn, loc_max, det_cnt
+  integer             :: icsf,j,k,l,icnt,bt
   integer             :: ms2,m2,nalpha,nopen,nloops
   integer             :: bvec(n_occ),aloc(n_occ),oopen(n_occ)
-  integer             :: idet(rec_len),det(rec_len),ref_det(rec_len)
+  integer             :: ref_det(rec_len), step_det(rec_len), multi_det(rec_len)
   double precision    :: cf
-  logical             :: zero
-  integer             :: ifac
-  integer             :: oparity
-  double precision    :: eps=1.d-8
-
-  db  = (/ 0,  1, -1, 0 /)
-  mz2 = (/ 1, -1 /)
-  d1f = (/ 1, -1 /)
-  d2f = (/-1,  1 /) 
-  del = (/ 1,  0 /)
-  ms2   = int(2.*m_s)
-
-  loop_csf_array: do icsf = 1,n_csf
+  logical             :: zero,found
+  !
+  integer,dimension(:,:),allocatable        :: vec_loc
+  double precision,dimension(:),allocatable :: cf_loc, phase_loc
   
-   bt    = 0
-   nopen = 0
-   oopen = 0
-   bvec  = 0
-   aloc  = 0
+
+  !  each csf gets 16 slots, fill in determinants as necessary
+  !  combine in serial as a second step, no reduction
+  ndet_max = 8
+  ndet_all = 0
+  allocate(det_vec(rec_len,ndet_max*n_csf))
+  allocate(det_cf(ndet_max*n_csf))
+  allocate(det_phase(ndet_max*n_csf))
+
+  !$omp parallel default(none) &
+  !$omp& shared(n_occ,rec_len,n_csf,m_s,ndet_all,csf_vec,csf_cf,det_vec,det_cf,det_phase)  &
+  !$omp& private(db,mz2,d1f,d2f,del) &
+  !$omp& private(num,denom,sgn,loc_max,det_cnt,icsf,j,k,l,icnt,bt) &
+  !$omp& private(ms2,m2,nalpha,nopen,nloops,bvec,aloc,oopen) &
+  !$omp& private(ref_det,step_det,multi_det,vec_loc,cf_loc,phase_loc) &
+  !$omp& private(cf,zero,found)
+
+  loc_max = 16
+  allocate(vec_loc(rec_len,loc_max*n_csf))
+  allocate(cf_loc(loc_max*n_csf))
+  allocate(phase_loc(loc_max*n_csf))  
+
+  db      = (/ 0,  1, -1, 0 /)
+  mz2     = (/ 1, -1 /)
+  d1f     = (/ 1, -1 /)
+  d2f     = (/-1,  1 /) 
+  del     = (/ 1,  0 /)
+  ms2     = int(2.*m_s)
+  det_cnt = 0
+  
+  !$omp master
+  call timer_start('generate determinant list')
+  !$omp end master
+  !$omp do
+  loop_csf_array: do icsf = 1,n_csf
+
+   bt      = 0
+   nopen   = 0
+   oopen   = 0
+   bvec    = 0
+   aloc    = 0
    ref_det = csf_vec(:,icsf)
 
-!   print *,''
-!   write(*,1002)csf_vec(:,icsf)
-!   print *,'-----------------------------------'
- 
    do j = 1,n_occ
     bt = bt + db(csf_vec(j,icsf)+1)
      bvec(j) = bt
@@ -366,7 +351,7 @@
    !loop over the allowed determinants
    !
    do j = 1,nloops
-    det = ref_det
+    step_det = ref_det
  
     if(nalpha.gt.0)then
      ! loop over all perumtations of alpha/beta occupations
@@ -381,7 +366,7 @@
  
      ! set selected unpaired electrons to alpha spin
      do k = 1,nalpha
-      det(oopen(aloc(k)))=1
+      step_det(oopen(aloc(k)))=1
      enddo
     endif
  
@@ -394,24 +379,24 @@
      select case(csf_vec(k,icsf))
   
        case(1)
-         m2 = m2 + mz2(det(k))
-         num = bvec(k) + d1f(det(k)) * m2
+         m2 = m2 + mz2(step_det(k))
+         num = bvec(k) + d1f(step_det(k)) * m2
          if(num == 0)then
           zero = .true.
           exit
-          endif
+         endif
          denom = 2 * bvec(k) 
          cf = cf * num / denom
  
        case(2)
-         m2 = m2 + mz2(det(k))
-         num = bvec(k) + 2 + d2f(det(k)) * m2
+         m2 = m2 + mz2(step_det(k))
+         num = bvec(k) + 2 + d2f(step_det(k)) * m2
          if(num == 0)then
           zero = .true.
-           exit
+          exit
          endif
          denom = 2 * (bvec(k) + 2)
-         sgn = sgn * (-1)**(bvec(k)+del(det(k)))
+         sgn = sgn * (-1)**(bvec(k)+del(step_det(k)))
          cf = cf * num / denom
  
        case(3)
@@ -422,67 +407,75 @@
      enddo ! do k =1 ,nocc 
  
      if(.not.zero) then
- 
+
+       ! add another determinant to the list
+       det_cnt = det_cnt + 1
+
        ! convert the determinant to multigrid format
-       call convert_det(det,idet)
+       call convert_det(step_det,multi_det)
+
        ! include parity in value of cf -- necessary to compute S^2 consistently
        if(cf.lt.0)stop 'ERROR computing determinant'
        cf = sqrt(cf)*sgn
 
-       found = 0
-       do k = 1,n_det_total
-        if(all(det_vec(:,k).eq.idet))then
-           found = k
-          exit
-        endif
-       enddo
- 
-!       write(*,1001)cf/oparity(idet)
-!       write(*,1002)idet
-       if(found.ne.0)then
-         det_cf(found)%val = det_cf(found)%val + cf*csf_cf(icsf)*phase(found)
-       else
-        n_det_total = n_det_total + 1
-        if(n_det_total.gt.n_det_max) stop 'ndet .gt. numdet, increase rdet2csf'
-        phase(n_det_total)      = oparity(idet)
-        det_cf(n_det_total)%ind = n_det_total
-        det_cf(n_det_total)%val = cf*csf_cf(icsf)*phase(n_det_total)
-        det_vec(:,n_det_total)  = idet
-       endif
- 
+       phase_loc(det_cnt) = oparity(multi_det)
+       cf_loc(det_cnt)    = csf_cf(icsf)*cf*phase_loc(det_cnt)
+       vec_loc(:,det_cnt) = multi_det
+
      endif !if(.not.zero) 
     enddo !do j = 1,nloops
-
    enddo loop_csf_array
+   !$omp end do
 
-  return
+   ! now collapse all determiants in to a unqiue list
+   !$omp critical 
+   do j = 1,det_cnt
+    multi_det = vec_loc(:,j)
+ 
+    ! scan master list to see if vector already stored
+    found = .false.
+    scan_detlist: do k = 1,ndet_all
+     if (any(multi_det.ne.det_vec(:,k))) cycle scan_detlist
+     found = .true.
+     exit
+    enddo scan_detlist
+
+    if(found) then
+     det_cf(k)%val = det_cf(k)%val + cf_loc(j)
+    else
+     ndet_all = ndet_all + 1
+     det_vec(:,ndet_all)  = multi_det
+     det_cf(ndet_all)%ind = ndet_all
+     det_cf(ndet_all)%val = cf_loc(j)
+     det_phase(ndet_all)  = phase_loc(j)
+    endif
+   enddo
+   !$omp end critical
+   !$omp end parallel
+
 1000 format(20(i3))
 1001 format(f18.12)
 1002 format(40(i3))
  end subroutine expand_csfs 
-
 
 !
 ! write the determinant list to standard output
 !
 !
  subroutine write_det_list
-  use globaldata
   implicit none
 
-  if(n_det_total.eq.0)return
+  if(ndet_all.eq.0)return
 
   ! sort so determinants printed largest coefficient to smallest
   call sort_det_list()
 
   ! print determinants
-  n_det = 1 
-  do while(abs(det_cf(n_det)%val).gt.det_min)
-   call print_det(det_cf(n_det)%val,det_vec(:,det_cf(n_det)%ind))
+  n_det = 0 
+  do while(n_det.lt.ndet_all.and.abs(det_cf(n_det+1)%val).gt.det_min)
    n_det = n_det + 1
-   if(n_det.gt.n_det_total)exit
+   call print_det(det_cf(n_det)%val,det_vec(:,det_cf(n_det)%ind))
   enddo
-  n_det = n_det - 1
 
   return
  end subroutine write_det_list
@@ -490,23 +483,19 @@
 !
 ! print diagnostics of the determinatn list
 !
- subroutine run_diagnostics(norm, s2)
-  use globaldata
+ subroutine run_diagnostics()
   implicit none
-  double precision,intent(out) :: norm, s2
 
   ! compute S^2 and norm -- should only include determinants that are printed, hence 'n_print'
-  call compute_norm_s2(n_det, norm, s2)
+  call compute_norm_s2()
 
  end subroutine run_diagnostics 
 
 !
 !
 ! 
- subroutine print_summary(norm, s2)
-  use globaldata
+ subroutine print_summary()
   implicit none
-  double precision, intent(in) :: norm, s2
   integer                      :: ofile=99
 
   ! not sure how to best handle this.  For the time being, useful to check
@@ -515,8 +504,8 @@
   write(ofile,"(' Diagnostic Report')")
   write(ofile,"(' -----------------')")
   write(ofile,"(' Norm of wfn in CSF basis: ',f15.10)")csf_norm
-  write(ofile,"(' Norm of wfn in det basis: ',f15.10)")norm
-  write(ofile,"(' <S^2>:                    ',f15.4)")s2
+  write(ofile,"(' Norm of wfn in det basis: ',f15.10)")det_norm
+  write(ofile,"(' <S^2>:                    ',f15.4)")det_s2
 
   call print_timer(ofile)
   close(ofile)
@@ -529,13 +518,13 @@
 ! deallocate dynamic memory arrays
 !
  subroutine cleanup()
-  use globaldata
   implicit none
 
   deallocate(csf_vec)
   deallocate(csf_cf)
   deallocate(det_vec)
   deallocate(det_cf)
+  deallocate(det_phase)
 
   return
  end subroutine cleanup
@@ -551,13 +540,12 @@
 !
 !
  subroutine sort_det_list
-  use globaldata
   implicit none
   integer                         :: i
   type(kvpair),allocatable        :: scr(:)
 
-  allocate(scr(int((n_det+1)/2)))
-  call mergesort(det_cf(1:n_det),n_det,scr)
+  allocate(scr(int((ndet_all+1)/2)))
+  call mergesort(det_cf(1:ndet_all),ndet_all,scr)
   deallocate(scr)
 
   return
@@ -568,7 +556,6 @@
 ! Convert a determinant in COLUMBUS 'step' notation to MULTIGRID notation
 !
  subroutine convert_det(indet,outdet)
-  use globaldata, only: rec_len,n_occ
   implicit none
   integer,intent(in)  :: indet(rec_len)
   integer,intent(out) :: outdet(rec_len)
@@ -586,56 +573,51 @@
 !
 !  compute effect of S2 operator on a single determinant
 !
-  subroutine compute_norm_s2(n, norm, s2)
-   use globaldata, only: rec_len,n_occ,det_cf,det_vec,phase
+  subroutine compute_norm_s2()
    implicit none
-   integer,intent(in)           :: n
-   double precision,intent(out) :: norm
-   double precision, intent(out):: s2
    integer                      :: ibra, braloc, iket, ketloc
    integer                      :: iorb, jorb
    integer                      :: bra(rec_len), ket(rec_len)
    integer                      :: trial(rec_len)
    double precision             :: bra_cf, ket_cf
+   double precision             :: s2_loc, norm_loc
 
    !$omp parallel default(none) &
-   !$omp& shared(n,det_vec,det_cf,n_occ,phase) private(iket,ibra,iorb,jorb,braloc,ketloc) &
-   !$omp& private(trial,bra,ket,bra_cf,ket_cf) reduction(+:s2,norm)
-   s2   = 0.
-   norm = 0.
+   !$omp& shared(n_det,n_occ,det_vec,det_cf,det_phase)  &
+   !$omp& private(iket,ibra,iorb,jorb,braloc,ketloc,trial,bra,ket,bra_cf,ket_cf) &
+   !$omp& reduction(+:s2_loc,norm_loc)
+   s2_loc   = 0.
+   norm_loc = 0.
 
    !$omp do
-   loop_ket: do iket = 1,n
+   loop_ket: do iket = 1,n_det
     ketloc = det_cf(iket)%ind
     ket    = det_vec(:,ketloc)
     ket_cf = det_cf(iket)%val
-    norm = norm + ket_cf**2
+    norm_loc = norm_loc + ket_cf**2
 
     scan_orbi: do iorb = 1,n_occ
      if(abs(ket(iorb)).ne.1)cycle scan_orbi
-     s2 = s2 + 0.5 * ket_cf**2 ! diagonal contribution of the ladder operators
+     s2_loc = s2_loc + 0.5 * ket_cf**2 ! diagonal contribution of the ladder operators
 
      scan_orbj: do jorb = 1,n_occ
       if(abs(ket(jorb)).ne.1) cycle scan_orbj
-      s2 = s2 + 0.25 * ket(iorb) * ket(jorb) * ket_cf**2 ! contribution from Sz^2
+      s2_loc = s2_loc + 0.25 * ket(iorb) * ket(jorb) * ket_cf**2 ! contribution from Sz^2
 
       if(ket(iorb).ne.ket(jorb)) then
        trial       =  ket
        trial(iorb) = -trial(iorb)
        trial(jorb) = -trial(jorb)
        
-       scan_bra: do ibra = 1,n
+       scan_bra: do ibra = 1,n_det
         braloc = det_cf(ibra)%ind
         bra    = det_vec(:,braloc)
         bra_cf = det_cf(ibra)%val 
 
         ! we're looking for trial in the det list..
-        if(any(bra.ne.trial)) then
-          cycle scan_bra
-        else
-          s2 = s2 + 0.5 * ket_cf * bra_cf * phase(ketloc) * phase(braloc)
-          exit ! each determinant in the list is unique, exit loop if we find right one.
-        endif
+        if(any(bra.ne.trial)) cycle scan_bra
+        s2_loc = s2_loc + 0.5 * ket_cf * bra_cf * det_phase(ketloc) * det_phase(braloc)
+        exit ! each determinant in the list is unique, exit loop if we find right one.
 
        enddo scan_bra ! end l = 1,ndet
       endif ! if(det(i,j)!=det(i,k)
@@ -645,7 +627,8 @@
   !$omp end do
   !$omp end parallel
 
-   norm = sqrt(norm)
+   det_norm = sqrt(norm_loc)
+   det_s2   = s2_loc
 
    return
   end subroutine compute_norm_s2
@@ -654,7 +637,6 @@
 ! prints a determinant in multigrid format
 !
  subroutine print_det(cf,det)
-  use globaldata, only: rec_len,n_intl,n_extl,n_occ,n_orb
   implicit none
   double precision,intent(in)       :: cf
   integer,intent(in)                :: det(rec_len)
@@ -723,18 +705,16 @@
 !  merge two lists in descending order
 ! 
  subroutine mergearr(a,b,c,na,nb,nc)
-   use globaldata
    integer, intent(in)         :: na,nb,nc   ! Normal usage: NA+NB = NC
    type(kvpair), intent(inout) :: a(na)      ! B overlays C(NA+1:NC)
    type(kvpair), intent(in)    :: b(nb)
    type(kvpair), intent(inout) :: c(nc)
-
    integer :: i,j,k
 
    i = 1
    j = 1
    k = 1
-   do while(i.le.na .and.j.le.nb)
+   do while(i.le.na.and.j.le.nb)
     if(abs(a(i)%val).ge.abs(b(j)%val)) then
        c(k) = a(i)
        i = i + 1
@@ -763,12 +743,11 @@
 ! sort list by divid and conquer
 !
  recursive subroutine mergesort(a,n,t)
-   use globaldata 
    integer, intent(in)                :: n
    type(kvpair), intent(inout)        :: a(n)
    type(kvpair), intent(out)          :: t(int((n+1)/2))
    integer                            :: na,nb
-   type(kvpair)                        :: dval
+   type(kvpair)                       :: dval
 
    if (n.lt.2) return
    if (n.eq.2) then
@@ -799,7 +778,6 @@
 ! get the sign change upon putting a determinant in alpha string notation
 !
  integer function oparity(det)
-  use globaldata, only: rec_len,n_occ,n_extl
   implicit none
   integer,intent(in)           :: det(rec_len)
   integer                      :: dsort(2*n_occ)
@@ -856,13 +834,13 @@
 !
 !
  subroutine timer_start(reg_name)
-  use globaldata
   implicit none
   character(len=*),intent(in) :: reg_name
   character*144               :: label
   double precision            :: tcpu, twall
   integer                     :: cnt, cnt_rate, cnt_max
-  integer                     :: it, timer_pos
+  integer                     :: it
+! integer                     :: timer_pos
 
   label = trim(adjustl(reg_name))
 
@@ -880,13 +858,13 @@
 !
 !
  subroutine timer_stop(reg_name)
-  use globaldata
   implicit none
   character(len=*),intent(in) :: reg_name
   character*144               :: label
   double precision            :: tcpu, twall
   integer                     :: cnt, cnt_rate, cnt_max
-  integer                     :: it, timer_pos
+  integer                     :: it
+!  integer                     :: timer_pos
 
   label = trim(adjustl(reg_name))
 
@@ -906,7 +884,6 @@
 !
 !
  subroutine print_timer(ofile)
-  use globaldata
   implicit none
   integer,intent(in)   :: ofile
   integer              :: i
@@ -934,7 +911,6 @@
 !
 !
  function timer_pos(label)
-  use globaldata
   implicit none
   character*144       :: label
   integer             :: timer_pos
@@ -956,3 +932,38 @@
   endif
 
  end function timer_pos
+
+end module csf2det
+
+!
+! Program: CSF2DET 
+!          -- convert a CI expansion in CSFs to one in determinants
+!
+!
+ PROGRAM csf2det_driver
+  use csf2det
+  implicit none
+
+  call read_cmdline()
+
+  call timer_start('parse_csf_list')
+  call parse_csf_list()
+  call timer_stop('parse_csf_list')
+
+  call timer_start('expand_csfs')
+  call expand_csfs()
+  call timer_stop('expand_csfs')
+
+  call timer_start('write_det_list')
+  call write_det_list()
+  call timer_stop('write_det_list')
+
+  call timer_start('run_diagnostics')
+  call run_diagnostics()
+  call timer_stop('run_diagnostics')
+
+  call print_summary()
+  call cleanup()
+
+ end PROGRAM csf2det_driver
+

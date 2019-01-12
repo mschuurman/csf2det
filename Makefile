@@ -3,8 +3,10 @@
 #                                              #
 ################################################
 
-FC = gfortran 
-FFLAGS = -fbounds-check -fopenmp 
+#FC = gfortran 
+#FFLAGS = -fbounds-check -fopenmp 
+FC = ifort
+FFLAGS = -check bounds -openmp
 SRCS = csf2det.F90
 OBJS = csf2det.o
 EXEC = csf2det.x
