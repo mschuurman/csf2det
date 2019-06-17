@@ -34,6 +34,8 @@
   integer                                   :: n_occ
   ! total number of orbitals in basis
   integer                                   :: n_orb
+  ! user defined number of MOs, i.e. pad "n_orb" so that it is nmo_tot
+  integer                                   :: nmo_pad = 0
 
   ! record length -- is nintl + 2 * next (i.e. external orbs, plus orb label)
   integer                                   :: rec_len
@@ -101,6 +103,12 @@
        call getarg(i_arg,abuf)
        abuf = trim(adjustl(abuf))
        read(abuf,*) det_min
+
+    elseif (trim(adjustl(abuf)) == '-n_mos') then
+       i_arg = i_arg + 1
+       call getarg(i_arg, abuf)
+       abuf = trim(adjustl(abuf))
+       read(abuf,*) nmo_pad
 
     else
        stop ' command line argument argument not recognized...'
@@ -228,7 +236,7 @@
   ! initially allocate the determinant array to 5 * CSFs
   n_occ     = n_intl + n_extl
   rec_len   = n_intl + 2*n_extl
-  n_orb       = n_occ
+  n_orb       = max(n_occ, nmo_pad)
   csf_norm    = 0.
   allocate(csf_vec(rec_len,n_csf))
   allocate(csf_cf(n_csf))
