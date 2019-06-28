@@ -259,11 +259,11 @@
    ! compute the norm of the csf wfn for diagnostic purposes
    csf_norm = csf_norm + csf_cf(icsf)**2
 
-   ! if the returned coefficient is zero, we've read all csfs less than cutoff
-   if (icsf == n_csf) exit
-
    ! check the external orbital index: update n_orb if necessary
    n_orb = max(n_orb, maxval(csf_vec(n_occ:,icsf)))
+
+   ! if the returned coefficient is zero, we've read all csfs less than cutoff
+   if (icsf == n_csf) exit
 
   enddo read_csf_list
 
