@@ -81,7 +81,7 @@
   integer                   :: n_arg, i_arg
   character*144             :: abuf
 
-  ls2=.true.
+  ls2=.false.
   
   n_arg = iargc()
 
