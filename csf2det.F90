@@ -63,6 +63,12 @@
   ! <S^2>
   double precision                           :: det_s2
   logical                                    :: ls2
+
+  ! vector to store the alpha and beta strings
+  integer                                    :: nalpha,nbeta
+  integer,dimension(:,:),allocatable         :: det_astring
+  integer,dimension(:,:),allocatable         :: det_bstring
+  logical                                    :: lbin
   
   ! number of timers
   integer                                    :: n_timers = 0
@@ -82,6 +88,7 @@
   character*144             :: abuf
 
   ls2=.false.
+  lbin=.false.
   
   n_arg = iargc()
 
@@ -92,7 +99,7 @@
   csf_file = adjustl(abuf)
 
   i_arg = 2
-  do while (i_arg < n_arg)
+  do while (i_arg <= n_arg)
     call getarg(i_arg,abuf)
     
     if (trim(adjustl(abuf)) == '-csf_min') then
@@ -123,6 +130,9 @@
        else
           stop ' command line argument argument not recognized: '//trim(abuf)
        endif
+
+    else if (trim(adjustl(abuf)) == '-bin') then
+       lbin=.true.
        
     else
        stop ' command line argument argument not recognized: '//trim(abuf)
@@ -299,7 +309,7 @@
   integer             :: db(4),mz2(2),d1f(2),d2f(2),del(2)
   integer             :: num, denom, sgn, loc_max, det_cnt
   integer             :: icsf,j,k,l,icnt,bt
-  integer             :: ms2,m2,nalpha,nopen,nloops
+  integer             :: ms2,m2,na,nopen,nloops
   integer             :: bvec(n_occ),aloc(n_occ),oopen(n_occ)
   integer             :: ref_det(rec_len), step_det(rec_len), multi_det(rec_len)
   double precision    :: cf
@@ -308,8 +318,9 @@
   integer,dimension(:,:),allocatable        :: vec_loc
   double precision,dimension(:),allocatable :: cf_loc, phase_loc
   
-  integer                       :: i,na,nb,ia,ib,i1,idet,last,mdet
+  integer                       :: i,ia,ib,i1,idet,last,mdet
   integer, allocatable          :: iocca(:),ioccb(:)
+  integer, allocatable          :: iocca_tot(:,:),ioccb_tot(:,:)
   integer, allocatable          :: ilbl(:),indx(:)
   integer, allocatable          :: vec_loc_tot(:,:)
   double precision, allocatable :: cf_loc_tot(:),phase_loc_tot(:)
@@ -337,22 +348,33 @@
   cf_loc_tot=0.0d0
   phase_loc_tot=0.0d0
   idet=0
+
+  ! Alpha and beta strings
+  allocate(det_astring(n_occ,ndet_max*n_csf))
+  allocate(det_bstring(n_occ,ndet_max*n_csf))
+  allocate(iocca_tot(n_occ,loc_max*n_csf))
+  allocate(ioccb_tot(n_occ,loc_max*n_csf))
+  det_astring=0.0d0
+  det_bstring=0.0d0
+  iocca_tot=0
+  ioccb_tot=0
   
   !$omp parallel default(none) &
   !$omp& shared(n_occ,rec_len,n_csf,m_s,ndet_all,csf_vec,csf_cf) &
   !$omp& shared(det_vec,det_cf,det_phase) &
-  !$omp& shared(na,nb,fmat_alpha,fmat_beta,n_orb,idet,ilbl) &
+  !$omp& shared(nalpha,nbeta,fmat_alpha,fmat_beta,n_orb,idet,ilbl) &
   !$omp& shared(vec_loc_tot,cf_loc_tot,phase_loc_tot,n_extl) &
+  !$omp& shared(iocca_tot,ioccb_tot) &
   !$omp& private(db,mz2,d1f,d2f,del) &
   !$omp& private(num,denom,sgn,loc_max,det_cnt,icsf,j,k,l,icnt,bt) &
-  !$omp& private(ms2,m2,nalpha,nopen,nloops,bvec,aloc,oopen) &
+  !$omp& private(ms2,m2,na,nopen,nloops,bvec,aloc,oopen) &
   !$omp& private(ref_det,step_det,multi_det,vec_loc,cf_loc,phase_loc) &
   !$omp& private(cf,zero,found) &
   !$omp& private(iocca,ioccb,ia,ib,occstring,i1)
   
   loc_max = 16
   allocate(vec_loc(rec_len,loc_max*n_csf))
-  allocate(cf_loc(loc_max*n_csf)) 
+  allocate(cf_loc(loc_max*n_csf))
   allocate(phase_loc(loc_max*n_csf))
 
   db      = (/ 0,  1, -1, 0 /)
@@ -384,12 +406,12 @@
    enddo !do j = 1,nocc
  
    ! set alpha spin counter
-   nalpha = (ms2 + nopen)/2
-   do j = 1,nalpha
+   na = (ms2 + nopen)/2
+   do j = 1,na
     aloc(j) = j
    enddo
-   if(nalpha.gt.0)aloc(nalpha) = aloc(nalpha)-1
-   nloops = ifac(nopen)/(ifac(nalpha)*ifac(nopen-nalpha))
+   if(na.gt.0)aloc(na) = aloc(na)-1
+   nloops = ifac(nopen)/(ifac(na)*ifac(nopen-na))
 
    !
    !loop over the allowed determinants
@@ -397,21 +419,21 @@
    do j = 1,nloops
     step_det = ref_det
  
-    if(nalpha.gt.0)then
+    if(na.gt.0)then
      ! loop over all perumtations of alpha/beta occupations
-     icnt = nalpha
-     do while(aloc(icnt) .eq. (nopen-nalpha+icnt))
+     icnt = na
+     do while(aloc(icnt) .eq. (nopen-na+icnt))
       icnt = icnt - 1
      enddo
      aloc(icnt) = aloc(icnt) + 1
-     do k = icnt+1,nalpha
+     do k = icnt+1,na
        aloc(k) = aloc(icnt)+k-icnt
      enddo
  
      ! set selected unpaired electrons to alpha spin
-     do k = 1,nalpha
+     do k = 1,na
       step_det(oopen(aloc(k)))=1
-     enddo
+   enddo
     endif
  
     ! determine the projection of the determinant on the CSF
@@ -512,49 +534,49 @@
 ! New algorithm start
    !$omp single
    ! Get the no. alpha and beta electrons
-   na=0
-   nb=0
+   nalpha=0
+   nbeta=0
    ! Int. orbitals
    do i=n_extl+1,rec_len-2
       if (vec_loc(i,1).eq.1) then
-         na=na+1
+         nalpha=nalpha+1
       else if (vec_loc(i,1).eq.-1) then
-         nb=nb+1
+         nbeta=nbeta+1
       else if (vec_loc(i,1).eq.2) then
-         na=na+1
-         nb=nb+1
+         nalpha=nalpha+1
+         nbeta=nbeta+1
       endif
    enddo
    if (vec_loc(rec_len-1,1).ne.0) then
       if (vec_loc(1,1).eq.1) then
-         na=na+1
+         nalpha=nalpha+1
       else if (vec_loc(1,1).eq.-1) then
-         nb=nb+1
+         nbeta=nbeta+1
       else if (vec_loc(1,1).eq.2) then
-         na=na+1
-         nb=nb+1
+         nalpha=nalpha+1
+         nbeta=nbeta+1
       endif
    endif
    ! Ext. orbitals
    if (vec_loc(rec_len,1).ne.0) then
       if (vec_loc(2,1).eq.1) then
-         na=na+1
+         nalpha=nalpha+1
       else if (vec_loc(2,1).eq.-1) then
-         nb=nb+1
+         nbeta=nbeta+1
       else if (vec_loc(2,1).eq.2) then
-         na=na+1
-         nb=nb+1
+         nalpha=nalpha+1
+         nbeta=nbeta+1
       endif
    endif
    
    ! Format statements
    fmat_alpha=''
    fmat_beta=''
-   write(fmat_alpha,'(a,i0,a)') '(',na,'i0)'
-   write(fmat_beta,'(a,i0,a)') '(',nb,'i0)'
+   write(fmat_alpha,'(a,i0,a)') '(',nalpha,'i0)'
+   write(fmat_beta,'(a,i0,a)') '(',nbeta,'i0)'
    !$omp end single   
 
-   allocate(iocca(na),ioccb(nb))
+   allocate(iocca(nalpha),ioccb(nbeta))
       
    !$omp critical
    ! Get unique integer labels for each determinant
@@ -613,9 +635,9 @@
       ! Fill in the occupation character string for the current
       ! determinant
       occstring=''
-      write(occstring,fmat_alpha) (iocca(i),i=1,na)
+      write(occstring,fmat_alpha) (iocca(i),i=1,nalpha)
       i1=1+len_trim(occstring)
-      write(occstring(i1:),fmat_beta) (-ioccb(i),i=1,nb)
+      write(occstring(i1:),fmat_beta) (-ioccb(i),i=1,nbeta)
 
       ! Compute the DJB hash of the occupation character string for
       ! the current determinant
@@ -628,6 +650,8 @@
       vec_loc_tot(:,idet)=vec_loc(:,j)
       cf_loc_tot(idet)=cf_loc(j)
       phase_loc_tot(idet)=phase_loc(j)
+      iocca_tot(1:nalpha,idet)=iocca(1:nalpha)
+      ioccb_tot(1:nalpha,idet)=ioccb(1:nbeta)
       
    enddo
    !$omp end critical
@@ -647,6 +671,8 @@
          det_cf(ndet_all)%ind=ndet_all
          det_cf(ndet_all)%val=cf_loc_tot(indx(i))
          det_phase(ndet_all)=phase_loc_tot(indx(i))
+         det_astring(1:nalpha,ndet_all)=iocca_tot(1:nalpha,indx(i))
+         det_bstring(1:nbeta,ndet_all)=ioccb_tot(1:nbeta,indx(i))
       else
          det_cf(ndet_all)%val=det_cf(ndet_all)%val + cf_loc_tot(indx(i))
       endif
@@ -792,18 +818,48 @@
  subroutine write_det_list
   implicit none
 
+  integer       :: unit,n,ilbl
+  character*144 :: det_file
+  
   if(ndet_all.eq.0)return
 
   ! sort so determinants printed largest coefficient to smallest
   call sort_det_list()
 
-  ! print determinants
+  ! print determinants to the screen
   n_det = 0 
   do while(n_det.lt.ndet_all.and.abs(det_cf(n_det+1)%val).gt.det_min)
    n_det = n_det + 1
    call print_det(det_cf(n_det)%val,det_vec(:,det_cf(n_det)%ind))
   enddo
 
+  ! print alpha and beta strings to a binary file
+  if (lbin) then
+     n_det=0
+     do while(n_det.lt.ndet_all.and.abs(det_cf(n_det+1)%val).gt.det_min)
+        n_det=n_det+1
+     enddo
+     unit=101
+     ilbl=index(csf_file,'csf')
+     det_file=''
+     write(det_file(1:ilbl-1),'(a)') csf_file(1:ilbl-1)
+     write(det_file(ilbl:ilbl+5),'(a)') 'det.1.'
+     write(det_file(ilbl+6:),'(a)') csf_file(ilbl+3:len_trim(csf_file))
+     det_file=trim(det_file)//'.bin'
+     open(unit,file=det_file,form='unformatted')
+     write(unit) n_det
+     write(unit) nalpha
+     write(unit) nbeta
+     do n=1,n_det
+        write(unit) det_astring(1:nalpha,det_cf(n)%ind)
+     enddo
+     do n=1,n_det
+        write(unit) det_bstring(1:nbeta,det_cf(n)%ind)
+     enddo
+     write(unit) det_cf(1:n_det)%val
+     close(unit)
+  endif
+     
   return
  end subroutine write_det_list
 
@@ -1012,8 +1068,7 @@
 
   return
  end subroutine print_det
-
-
+   
 !
 ! Returns n!
 !
