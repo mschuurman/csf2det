@@ -1,10 +1,11 @@
 ################################################
-# Makefile for compiling NADVIBS               #
+# Makefile for compiling csf2det               #
 #                                              #
 ################################################
 
 FC = gfortran 
-FFLAGS = -fbounds-check -fopenmp 
+FFLAGS = -fopenmp
+#FFLAGS = -fcheck=all -fopenmp
 #FC = ifort
 #FFLAGS = -check bounds -openmp
 SRCS = csf2det.F90

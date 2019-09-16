@@ -62,13 +62,14 @@
   double precision                           :: det_norm
   ! <S^2>
   double precision                           :: det_s2
-
+  logical                                    :: ls2
+  
   ! number of timers
-  integer                                   :: n_timers = 0
+  integer                                    :: n_timers = 0
   ! maximum number of timers
-  integer,parameter                         :: nt_max = 10
+  integer,parameter                          :: nt_max = 10
   ! list of timers
-  type(t_region),dimension(10)              :: t_list
+  type(t_region),dimension(10)               :: t_list
 
  contains
 
@@ -80,6 +81,8 @@
   integer                   :: n_arg, i_arg
   character*144             :: abuf
 
+  ls2=.true.
+  
   n_arg = iargc()
 
   if(n_arg.lt.1)stop 'need to specify input file...'
@@ -91,7 +94,7 @@
   i_arg = 2
   do while (i_arg < n_arg)
     call getarg(i_arg,abuf)
-
+    
     if (trim(adjustl(abuf)) == '-csf_min') then
        i_arg = i_arg + 1
        call getarg(i_arg,abuf)
@@ -110,9 +113,20 @@
        abuf = trim(adjustl(abuf))
        read(abuf,*) nmo_pad
 
+    else if (trim(adjustl(abuf)) == '-s2') then
+       i_arg = i_arg + 1
+       call getarg(i_arg,abuf)
+       if (abuf.eq.'true') then
+          ls2=.true.
+       else if (abuf.eq.'false') then
+          ls2=.false.
+       else
+          stop ' command line argument argument not recognized: '//trim(abuf)
+       endif
+       
     else
-       stop ' command line argument argument not recognized...'
-           
+       stop ' command line argument argument not recognized: '//trim(abuf)
+       
     endif
 
     i_arg = i_arg + 1
@@ -294,6 +308,13 @@
   integer,dimension(:,:),allocatable        :: vec_loc
   double precision,dimension(:),allocatable :: cf_loc, phase_loc
   
+  integer                       :: i,na,nb,ia,ib,i1,idet,last,mdet
+  integer, allocatable          :: iocca(:),ioccb(:)
+  integer, allocatable          :: ilbl(:),indx(:)
+  integer, allocatable          :: vec_loc_tot(:,:)
+  double precision, allocatable :: cf_loc_tot(:),phase_loc_tot(:)
+  character(len=10)             :: fmat_alpha,fmat_beta
+  character(len=n_orb)          :: occstring
 
   !  each csf gets 16 slots, fill in determinants as necessary
   !  combine in serial as a second step, no reduction
@@ -303,18 +324,36 @@
   allocate(det_cf(ndet_max*n_csf))
   allocate(det_phase(ndet_max*n_csf))
 
+  ! Hash-based unique determinant determination arrays
+  loc_max = 16
+  allocate(ilbl(ndet_max*n_csf))
+  allocate(indx(ndet_max*n_csf))
+  allocate(vec_loc_tot(rec_len,loc_max*n_csf))
+  allocate(cf_loc_tot(loc_max*n_csf))
+  allocate(phase_loc_tot(loc_max*n_csf))
+  ilbl=0
+  indx=0
+  vec_loc_tot=0
+  cf_loc_tot=0.0d0
+  phase_loc_tot=0.0d0
+  idet=0
+  
   !$omp parallel default(none) &
-  !$omp& shared(n_occ,rec_len,n_csf,m_s,ndet_all,csf_vec,csf_cf,det_vec,det_cf,det_phase)  &
+  !$omp& shared(n_occ,rec_len,n_csf,m_s,ndet_all,csf_vec,csf_cf) &
+  !$omp& shared(det_vec,det_cf,det_phase) &
+  !$omp& shared(na,nb,fmat_alpha,fmat_beta,n_orb,idet,ilbl) &
+  !$omp& shared(vec_loc_tot,cf_loc_tot,phase_loc_tot,n_extl) &
   !$omp& private(db,mz2,d1f,d2f,del) &
   !$omp& private(num,denom,sgn,loc_max,det_cnt,icsf,j,k,l,icnt,bt) &
   !$omp& private(ms2,m2,nalpha,nopen,nloops,bvec,aloc,oopen) &
   !$omp& private(ref_det,step_det,multi_det,vec_loc,cf_loc,phase_loc) &
-  !$omp& private(cf,zero,found)
-
+  !$omp& private(cf,zero,found) &
+  !$omp& private(iocca,ioccb,ia,ib,occstring,i1)
+  
   loc_max = 16
   allocate(vec_loc(rec_len,loc_max*n_csf))
-  allocate(cf_loc(loc_max*n_csf))
-  allocate(phase_loc(loc_max*n_csf))  
+  allocate(cf_loc(loc_max*n_csf)) 
+  allocate(phase_loc(loc_max*n_csf))
 
   db      = (/ 0,  1, -1, 0 /)
   mz2     = (/ 1, -1 /)
@@ -442,37 +481,310 @@
    enddo loop_csf_array
    !$omp end do
 
-   ! now collapse all determiants in to a unqiue list
-   !$omp critical 
-   do j = 1,det_cnt
-    multi_det = vec_loc(:,j)
- 
-    ! scan master list to see if vector already stored
-    found = .false.
-    scan_loclist: do k = 1,ndet_all
-     if (any(multi_det.ne.det_vec(:,k))) cycle scan_loclist
-     found = .true.
-     exit
-    enddo scan_loclist
+! Old algorithm end
+!   ! now collapse all determiants in to a unqiue list
+!   !$omp critical
+!   do j = 1,det_cnt
+!    multi_det = vec_loc(:,j)
+! 
+!    ! scan master list to see if vector already stored
+!    found = .false.
+!    scan_loclist: do k = 1,ndet_all
+!     if (any(multi_det.ne.det_vec(:,k))) cycle scan_loclist
+!     found = .true.
+!     exit
+!    enddo scan_loclist
+!
+!    if(found) then
+!     det_cf(k)%val = det_cf(k)%val + cf_loc(j)
+!    else
+!     ndet_all = ndet_all + 1
+!     det_vec(:,ndet_all)  = multi_det
+!     det_cf(ndet_all)%ind = ndet_all
+!     det_cf(ndet_all)%val = cf_loc(j)
+!     det_phase(ndet_all)  = phase_loc(j)
+!    endif
+!   enddo
+!   !$omp end critical
+!   !$omp end parallel
+! Old algorithm end
+   
+! New algorithm start
+   !$omp single
+   ! Get the no. alpha and beta electrons
+   na=0
+   nb=0
+   ! Int. orbitals
+   do i=n_extl+1,rec_len-2
+      if (vec_loc(i,1).eq.1) then
+         na=na+1
+      else if (vec_loc(i,1).eq.-1) then
+         nb=nb+1
+      else if (vec_loc(i,1).eq.2) then
+         na=na+1
+         nb=nb+1
+      endif
+   enddo
+   if (vec_loc(rec_len-1,1).ne.0) then
+      if (vec_loc(1,1).eq.1) then
+         na=na+1
+      else if (vec_loc(1,1).eq.-1) then
+         nb=nb+1
+      else if (vec_loc(1,1).eq.2) then
+         na=na+1
+         nb=nb+1
+      endif
+   endif
+   ! Ext. orbitals
+   if (vec_loc(rec_len,1).ne.0) then
+      if (vec_loc(2,1).eq.1) then
+         na=na+1
+      else if (vec_loc(2,1).eq.-1) then
+         nb=nb+1
+      else if (vec_loc(2,1).eq.2) then
+         na=na+1
+         nb=nb+1
+      endif
+   endif
+   
+   ! Format statements
+   fmat_alpha=''
+   fmat_beta=''
+   write(fmat_alpha,'(a,i0,a)') '(',na,'i0)'
+   write(fmat_beta,'(a,i0,a)') '(',nb,'i0)'
+   !$omp end single   
 
-    if(found) then
-     det_cf(k)%val = det_cf(k)%val + cf_loc(j)
-    else
-     ndet_all = ndet_all + 1
-     det_vec(:,ndet_all)  = multi_det
-     det_cf(ndet_all)%ind = ndet_all
-     det_cf(ndet_all)%val = cf_loc(j)
-     det_phase(ndet_all)  = phase_loc(j)
-    endif
+   allocate(iocca(na),ioccb(nb))
+      
+   !$omp critical
+   ! Get unique integer labels for each determinant
+   do j=1,det_cnt
+      ! Get the indices of the occupied spinorbitals for the current
+      ! determinant
+      iocca=0
+      ioccb=0
+      ia=0
+      ib=0
+      ! Int. orbitals
+      do i=n_extl+1,rec_len-2
+         if (vec_loc(i,j).eq.1) then
+            ia=ia+1
+            iocca(ia)=i
+         else if (vec_loc(i,j).eq.-1) then
+            ib=ib+1
+            ioccb(ib)=i
+         else if (vec_loc(i,j).eq.2) then
+            ia=ia+1
+            ib=ib+1
+            iocca(ia)=i
+            ioccb(ib)=i
+         endif
+      enddo
+      ! Ext. orbitals
+      if (vec_loc(rec_len-1,j).ne.0) then
+         if (vec_loc(1,j).eq.1) then
+            ia=ia+1
+            iocca(ia)=vec_loc(rec_len-1,j)
+         else if (vec_loc(1,j).eq.-1) then
+            ib=ib+1
+            ioccb(ib)=vec_loc(rec_len-1,j)
+         else if (vec_loc(1,j).eq.2) then
+            ia=ia+1
+            ib=ib+1
+            iocca(ia)=vec_loc(rec_len-1,j)
+            ioccb(ib)=vec_loc(rec_len-1,j)
+         endif
+      endif
+      if (vec_loc(rec_len,j).ne.0) then
+         if (vec_loc(2,j).eq.1) then
+            ia=ia+1
+            iocca(ia)=vec_loc(rec_len,j)
+         else if (vec_loc(2,j).eq.-1) then
+            ib=ib+1
+            ioccb(ib)=vec_loc(rec_len,j)
+         else if (vec_loc(2,j).eq.2) then
+            ia=ia+1
+            ib=ib+1
+            iocca(ia)=vec_loc(rec_len,j)
+            ioccb(ib)=vec_loc(rec_len,j)
+         endif
+      endif
+      
+      ! Fill in the occupation character string for the current
+      ! determinant
+      occstring=''
+      write(occstring,fmat_alpha) (iocca(i),i=1,na)
+      i1=1+len_trim(occstring)
+      write(occstring(i1:),fmat_beta) (-ioccb(i),i=1,nb)
+
+      ! Compute the DJB hash of the occupation character string for
+      ! the current determinant
+      i1=1+len_trim(occstring)
+
+      idet=idet+1
+      ilbl(idet)=djb_hash(occstring(1:i1))
+
+      ! Fill in the occupations and coefficient for the current determinant
+      vec_loc_tot(:,idet)=vec_loc(:,j)
+      cf_loc_tot(idet)=cf_loc(j)
+      phase_loc_tot(idet)=phase_loc(j)
+      
    enddo
    !$omp end critical
+
    !$omp end parallel
 
+   ! Sort the determinant integer labels
+   call i4sortindxa1('A',idet,ilbl,indx)
+
+   ! Collate the unique determinants
+   last=ilbl(indx(1))-1
+   do i=1,idet
+      if (ilbl(indx(i)).ne.last) then
+         last=ilbl(indx(i))
+         ndet_all=ndet_all+1
+         det_vec(:,ndet_all)=vec_loc_tot(:,indx(i))
+         det_cf(ndet_all)%ind=ndet_all
+         det_cf(ndet_all)%val=cf_loc_tot(indx(i))
+         det_phase(ndet_all)=phase_loc_tot(indx(i))
+      else
+         det_cf(ndet_all)%val=det_cf(ndet_all)%val + cf_loc_tot(indx(i))
+      endif
+   enddo
+! New algorithm end
+   
 1000 format(20(i3))
 1001 format(f18.12)
 1002 format(40(i3))
  end subroutine expand_csfs 
 
+!
+! DJB hash function
+! 
+ integer function djb_hash(str)
+
+   implicit none
+      
+   character(len=*) str
+   integer          i
+      
+   djb_hash = 5381
+
+   do i=1,len(str)
+      djb_hash=(ishft(djb_hash,5)+djb_hash)+ichar(str(i:i))
+   enddo
+   
+   return
+ end function djb_hash
+
+!
+! 4-byte integer array sorting routine
+!
+ subroutine i4sortindxa1(order,ndim,arrin,indx)
+
+   implicit none
+    
+   character(1) order
+   integer*4    ndim
+   integer*4    arrin(ndim)
+   integer*4    indx(ndim)
+   integer*4    i,l,ir,indxt,j
+   integer*4    q
+
+! This subroutine is adapted from the NR p233, employs heapsort.
+    
+   if (ndim.eq.1) then
+      indx(1)=1
+      return
+   endif
+         
+   do i= 1,ndim
+      indx(i)=i
+   end do
+    
+   l=ndim/2+1
+   ir=ndim
+    
+   if(order .eq. 'D') then
+       
+10    continue
+      if(l .gt. 1) then
+         l=l-1
+         indxt=indx(l)
+         q=arrin(indxt)
+      else
+         indxt=indx(ir)
+         q=arrin(indxt)
+         indx(ir)=indx(1)
+         ir=ir-1
+         if(ir .eq. 1) then
+            indx(1)=indxt
+            return
+         end if
+      end if
+         
+      i=l
+      j=l+l
+         
+20    if(j .le. ir) then
+         if(j .lt. ir) then
+            if(arrin(indx(j)) .gt. arrin(indx(j+1))) j=j+1 !
+         end if
+         if(q .gt. arrin(indx(j))) then !
+            indx(i)=indx(j)
+            i=j
+            j=j+j
+         else
+            j=ir+1
+         end if
+         go to 20
+      end if
+      indx(i)=indxt
+      go to 10
+         
+   elseif(order .eq. 'A') then
+         
+100   continue
+      if(l .gt. 1) then
+         l=l-1
+         indxt=indx(l)
+         q=arrin(indxt)
+      else
+         indxt=indx(ir)
+         q=arrin(indxt)
+         indx(ir)=indx(1)
+         ir=ir-1
+         if(ir .eq. 1) then
+            indx(1)=indxt
+            return
+         end if
+      end if
+      
+      i=l
+      j=l+l
+      
+200   if(j .le. ir) then
+         if(j .lt. ir) then
+            if(arrin(indx(j)) .lt. arrin(indx(j+1))) j=j+1
+         end if
+         if(q .lt. arrin(indx(j))) then
+            indx(i)=indx(j)
+            i=j
+            j=j+j
+         else
+            j=ir+1
+         end if
+         go to 200
+      end if
+      indx(i)=indxt
+      go to 100
+   
+   end if
+
+   return
+   
+ end subroutine i4sortindxa1
+ 
 !
 ! write the determinant list to standard output
 !
@@ -500,11 +812,12 @@
 !
  subroutine run_diagnostics()
   implicit none
+  
+  ! compute S^2 and norm
+  if (ls2) call compute_s2()
+  det_norm=sqrt(sum(det_cf(1:n_det)%val**2))
 
-  ! compute S^2 and norm -- should only include determinants that are printed, hence 'n_print'
-  call compute_norm_s2()
-
- end subroutine run_diagnostics 
+ end subroutine run_diagnostics
 
 !
 !
@@ -520,7 +833,7 @@
   write(ofile,"(' -----------------')")
   write(ofile,"(' Norm of wfn in CSF basis: ',f15.10)")csf_norm
   write(ofile,"(' Norm of wfn in det basis: ',f15.10)")det_norm
-  write(ofile,"(' <S^2>:                    ',f15.4)")det_s2
+  if (ls2) write(ofile,"(' <S^2>:                    ',f15.4)")det_s2
 
   call print_timer(ofile)
   close(ofile)
@@ -584,11 +897,11 @@
 
   return
  end subroutine convert_det
-
+    
 !
 !  compute effect of S2 operator on a single determinant
 !
-  subroutine compute_norm_s2()
+  subroutine compute_s2()
    implicit none
    integer                      :: ibra, braloc, iket, ketloc
    integer                      :: iorb, jorb
@@ -646,7 +959,7 @@
    det_s2   = s2_loc
 
    return
-  end subroutine compute_norm_s2
+  end subroutine compute_s2
 
 !
 ! prints a determinant in multigrid format
