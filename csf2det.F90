@@ -591,15 +591,15 @@
       do i=n_extl+1,rec_len-2
          if (vec_loc(i,j).eq.1) then
             ia=ia+1
-            iocca(ia)=i
+            iocca(ia)=i-n_extl
          else if (vec_loc(i,j).eq.-1) then
             ib=ib+1
-            ioccb(ib)=i
+            ioccb(ib)=i-n_extl
          else if (vec_loc(i,j).eq.2) then
             ia=ia+1
             ib=ib+1
-            iocca(ia)=i
-            ioccb(ib)=i
+            iocca(ia)=i-n_extl
+            ioccb(ib)=i-n_extl
          endif
       enddo
       ! Ext. orbitals
