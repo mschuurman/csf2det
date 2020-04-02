@@ -128,14 +128,14 @@
        else if (abuf.eq.'false') then
           ls2=.false.
        else
-          stop ' command line argument argument not recognized: '//trim(abuf)
+          stop ' command line argument argument not recognized. '
        endif
 
     else if (trim(adjustl(abuf)) == '-bin') then
        lbin=.true.
        
     else
-       stop ' command line argument argument not recognized: '//trim(abuf)
+       stop ' command line argument argument not recognized: '
        
     endif
 
@@ -325,7 +325,9 @@
   integer, allocatable          :: vec_loc_tot(:,:)
   double precision, allocatable :: cf_loc_tot(:),phase_loc_tot(:)
   character(len=10)             :: fmat_alpha,fmat_beta
-  character(len=n_orb)          :: occstring
+  character(len=2000)           :: occstring
+
+  if(n_orb*6 > 2000) stop 'increase the length of occstring'
 
   !  each csf gets 16 slots, fill in determinants as necessary
   !  combine in serial as a second step, no reduction
@@ -363,7 +365,7 @@
   !$omp& shared(n_occ,rec_len,n_csf,m_s,ndet_all,csf_vec,csf_cf) &
   !$omp& shared(det_vec,det_cf,det_phase) &
   !$omp& shared(nalpha,nbeta,fmat_alpha,fmat_beta,n_orb,idet,ilbl) &
-  !$omp& shared(vec_loc_tot,cf_loc_tot,phase_loc_tot,n_extl) &
+  !$omp& shared(vec_loc_tot,cf_loc_tot,phase_loc_tot,n_extl,n_intl) &
   !$omp& shared(iocca_tot,ioccb_tot) &
   !$omp& private(db,mz2,d1f,d2f,del) &
   !$omp& private(num,denom,sgn,loc_max,det_cnt,icsf,j,k,l,icnt,bt) &
@@ -537,7 +539,7 @@
    nalpha=0
    nbeta=0
    ! Int. orbitals
-   do i=n_extl+1,rec_len-2
+   do i=n_extl+1,rec_len-n_extl
       if (vec_loc(i,1).eq.1) then
          nalpha=nalpha+1
       else if (vec_loc(i,1).eq.-1) then
@@ -547,28 +549,20 @@
          nbeta=nbeta+1
       endif
    enddo
-   if (vec_loc(rec_len-1,1).ne.0) then
-      if (vec_loc(1,1).eq.1) then
-         nalpha=nalpha+1
-      else if (vec_loc(1,1).eq.-1) then
-         nbeta=nbeta+1
-      else if (vec_loc(1,1).eq.2) then
-         nalpha=nalpha+1
-         nbeta=nbeta+1
-      endif
-   endif
    ! Ext. orbitals
-   if (vec_loc(rec_len,1).ne.0) then
-      if (vec_loc(2,1).eq.1) then
+   do i=1,n_extl
+     if(vec_loc(n_extl+n_intl+i,1).ne.0) then
+       if (vec_loc(i,1).eq.1) then
          nalpha=nalpha+1
-      else if (vec_loc(2,1).eq.-1) then
+       else if(vec_loc(i,1).eq.-1) then
          nbeta=nbeta+1
-      else if (vec_loc(2,1).eq.2) then
+       else if(vec_loc(i,1).eq.2) then
          nalpha=nalpha+1
          nbeta=nbeta+1
-      endif
-   endif
-   
+       endif
+     endif
+   enddo
+  
    ! Format statements
    fmat_alpha=''
    fmat_beta=''
@@ -577,18 +571,19 @@
    !$omp end single   
 
    allocate(iocca(nalpha),ioccb(nbeta))
-      
+  
    !$omp critical
    ! Get unique integer labels for each determinant
    do j=1,det_cnt
       ! Get the indices of the occupied spinorbitals for the current
       ! determinant
+
       iocca=0
       ioccb=0
       ia=0
       ib=0
       ! Int. orbitals
-      do i=n_extl+1,rec_len-2
+      do i=n_extl+1,rec_len-n_extl
          if (vec_loc(i,j).eq.1) then
             ia=ia+1
             iocca(ia)=i-n_extl
@@ -603,35 +598,23 @@
          endif
       enddo
       ! Ext. orbitals
-      if (vec_loc(rec_len-1,j).ne.0) then
-         if (vec_loc(1,j).eq.1) then
+      do i = 1,n_extl
+        if (vec_loc(n_extl+n_intl+i,j).ne.0) then
+          if (vec_loc(i,j).eq.1) then
             ia=ia+1
-            iocca(ia)=vec_loc(rec_len-1,j)
-         else if (vec_loc(1,j).eq.-1) then
+            iocca(ia)=vec_loc(n_extl+n_intl+i,j)
+          else if (vec_loc(i,j).eq.-1) then
             ib=ib+1
-            ioccb(ib)=vec_loc(rec_len-1,j)
-         else if (vec_loc(1,j).eq.2) then
-            ia=ia+1
-            ib=ib+1
-            iocca(ia)=vec_loc(rec_len-1,j)
-            ioccb(ib)=vec_loc(rec_len-1,j)
-         endif
-      endif
-      if (vec_loc(rec_len,j).ne.0) then
-         if (vec_loc(2,j).eq.1) then
-            ia=ia+1
-            iocca(ia)=vec_loc(rec_len,j)
-         else if (vec_loc(2,j).eq.-1) then
-            ib=ib+1
-            ioccb(ib)=vec_loc(rec_len,j)
-         else if (vec_loc(2,j).eq.2) then
+            ioccb(ib)=vec_loc(n_extl+n_intl+i,j)
+          else if (vec_loc(i,j).eq.2) then
             ia=ia+1
             ib=ib+1
-            iocca(ia)=vec_loc(rec_len,j)
-            ioccb(ib)=vec_loc(rec_len,j)
-         endif
-      endif
-      
+            iocca(ia)=vec_loc(n_extl+n_intl+i,j)
+            ioccb(ib)=vec_loc(n_extl+n_intl+i,j)
+          endif
+        endif
+      enddo
+
       ! Fill in the occupation character string for the current
       ! determinant
       occstring=''
